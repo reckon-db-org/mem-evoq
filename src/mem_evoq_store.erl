@@ -106,6 +106,13 @@ handle_call({delete, StreamId}, _From, State) ->
     {reply, ok, do_delete_stream(StreamId, State)};
 
 %%--------------------------------------------------------------------
+%% Cross-stream reads
+%%--------------------------------------------------------------------
+
+handle_call({read_all_global, Offset, BatchSize}, _From, State) ->
+    {reply, do_read_all_global(Offset, BatchSize, State), State};
+
+%%--------------------------------------------------------------------
 %% Snapshots + subscriptions (further moves — pending)
 %%--------------------------------------------------------------------
 
@@ -324,6 +331,33 @@ do_delete_stream(StreamId, #state{streams = S, snapshots = SS} = State) ->
         streams   = maps:remove(StreamId, S),
         snapshots = maps:remove(StreamId, SS)
     }.
+
+%%====================================================================
+%% Internal — cross-stream reads
+%%====================================================================
+
+%% @private Read all events across all streams, sorted by epoch_us,
+%% skipping `Offset` events and returning up to `BatchSize` events.
+%%
+%% This is the catch-up subscription primitive; reckon-db's
+%% reckon_db_streams:read_all_global/3 does the same thing against
+%% Khepri. Within a single store instance ties on epoch_us are
+%% rare but possible (microsecond timestamps); we don't impose a
+%% secondary sort because reckon-db doesn't either.
+-spec do_read_all_global(non_neg_integer(), pos_integer(), #state{}) ->
+    {ok, [event()]} | {error, term()}.
+do_read_all_global(Offset, BatchSize, #state{streams = Streams})
+        when is_integer(Offset), Offset >= 0,
+             is_integer(BatchSize), BatchSize > 0 ->
+    AllEvents = lists:append(maps:values(Streams)),
+    Sorted = lists:sort(
+        fun(#event{epoch_us = A}, #event{epoch_us = B}) -> A =< B end,
+        AllEvents
+    ),
+    Sliced = lists:sublist(Sorted, Offset + 1, BatchSize),
+    {ok, Sliced};
+do_read_all_global(_Offset, _BatchSize, _State) ->
+    {error, badarg}.
 
 %%====================================================================
 %% Internal — integrity init
