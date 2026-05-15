@@ -5,23 +5,56 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-05-15
 
-### Scaffold
+Initial release. In-memory event-store adapter for [evoq](https://codeberg.org/reckon-db-org/evoq) — a reference implementation of the `evoq_event_store` callback contract, intended for tests, demos, and integration scaffolding without spinning up Khepri/Ra.
 
-* OTP application skeleton: `mem_evoq_app`, `mem_evoq_sup`,
-  `mem_evoq_registry` (ETS-backed StoreId→pid lookup),
-  `mem_evoq_store` (per-store gen_server skeleton).
-* Public facade: `mem_evoq:start_store/1,2`, `stop_store/1`,
-  `list_stores/0`.
-* Adapter shell: `mem_evoq_adapter` exports the full
-  `evoq_event_store` callback surface; every callback forwards to
-  the store gen_server, which currently returns
-  `{error, not_implemented}` so the wiring is verifiable but the
-  behaviour is loud rather than silent.
-* Integrity config plumbing: `mem_evoq:start_store/2` accepts
-  `#{integrity => disabled | #{enabled := true, key := binary()}}`
-  and validates the 32-byte key constraint at start time.
+### Adapter surface
 
-Build is clean (`rebar3 compile`). No callbacks implemented yet —
-that work is sequenced in `plans/PLAN_MEM_EVOQ.md`.
+- `mem_evoq_adapter` implements the full `evoq_event_store` callback set: append, read (forward/backward, with optional `verify` mode), read_all / read_all_global, version, exists, has_events, list_streams, delete, save_snapshot / load_snapshot / list_snapshots / delete_snapshot, subscribe / subscribe_all / unsubscribe.
+- `mem_evoq` facade: `start_store/1,2`, `stop_store/1`, `list_stores/0`.
+- `mem_evoq_registry` — ETS-backed StoreId → Pid lookup with monitor-driven cleanup.
+- `mem_evoq_store` — per-store gen_server holding streams, snapshots, subscribers, and (when enabled) the integrity context.
+
+### Write path
+
+- `append/4` honours `?NO_STREAM`, `?ANY_VERSION`, `?STREAM_EXISTS`, and exact-version expected-version semantics matching reckon-db.
+- Cross-stream global ordering via `epoch_us` microsecond timestamps.
+
+### Read path
+
+- Forward and backward reads slice exact `[FromVersion, FromVersion+Count-1]` (forward) / `[max(0, FromVersion-Count+1), FromVersion]` (backward) windows.
+- Out-of-range requests return partial results (no padding, no error). Stream-not-found returns `{stream_not_found, StreamId}`.
+- Optional `read/6` accepting `#{verify => skip_legacy | strict | skip_all}` for integrity-enabled stores. Backward verification uses the reverse → verify forward → reverse-back trick from reckon-db 2.1.1.
+
+### Subscriptions
+
+- Per-store subscribe / subscribe_all / unsubscribe.
+- Filter taxonomy: `by_stream`, `by_event_type`, `by_event_pattern`, `by_tags` (with `any` / `all` match).
+- `from => 0` triggers synchronous catch-up replay before the call returns.
+- Dead-subscriber cleanup via `process` monitor — subscriptions self-evict on `'DOWN'`.
+
+### Snapshots
+
+- Save / load / load-at-version / list / delete.
+- Stream deletion cascades to snapshots.
+
+### Tamper resistance (opt-in per store)
+
+- `start_store/2` accepts `#{integrity => #{enabled => true, key => Key}}` — Key must be exactly 32 bytes. Invalid sizes / malformed maps surface as `{error, ...}` at start time.
+- Every appended event under an integrity-enabled store carries `prev_event_hash` (genesis for v0, chain hash of predecessor thereafter) and `mac` (HMAC-SHA256 via `reckon_gater_integrity`).
+- Per-stream chain-start watermark recorded on the first append; lazy enablement supports stores switched on mid-life.
+- Read verification: `strict` fails on legacy events; `skip_legacy` (default) verifies integrity-bearing events only; `skip_all` disables verification entirely.
+- Snapshots carry `anchor_hash` (chain hash of the event at the snapshot's version) + `mac`. Load recomputes the anchor — a tampered underlying stream surfaces as `snapshot_anchor_mismatch` even if the tampered event itself has been re-signed with the legitimate key.
+- Subscription catch-up MAC-verifies every event before delivery; violations halt the catch-up with `{subscription_error, {integrity_violation, _}}`.
+
+### Tests
+
+- 93 EUnit tests across append / read / metadata / read_all_global / subscription / snapshot / integrity / snapshot-integrity surfaces.
+- 6 Common Test cases (`test/integration/mem_evoq_integrity_writes_SUITE`) mirroring `reckon_db_integrity_writes_SUITE`.
+- 6 PropEr properties × 100 random runs each (`test/prop/prop_mem_evoq`).
+- Total: 699 distinct test invocations on `rebar3 eunit && rebar3 ct && rebar3 proper`.
+
+### Out of scope (see README limitations table)
+
+Persistence, clustering / replication, key rotation, per-region keys, vault integration, capability-token-bound writes, scavenging / archive, and reckon-db's full filter taxonomy. For any of these, pair evoq with `reckon-evoq` + `reckon-db`.
