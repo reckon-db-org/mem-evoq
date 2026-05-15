@@ -50,9 +50,10 @@ prop_snapshot_roundtrip() ->
     ?FORALL({StreamId, V}, {stream_id(), integer(0, 100)},
         with_store(disabled, fun(StoreId) ->
             Data = #{value => V, marker => <<"snap">>},
-            ok = mem_evoq_adapter:save_snapshot(StoreId, StreamId, V, Data, #{}),
-            {ok, Loaded} = mem_evoq_adapter:load_snapshot(StoreId, StreamId),
-            Loaded#snapshot.version =:= V andalso Loaded#snapshot.data =:= Data
+            ok = mem_evoq_adapter:save(StoreId, StreamId, V, Data, #{}),
+            {ok, Loaded} = mem_evoq_adapter:read(StoreId, StreamId),
+            Loaded#evoq_snapshot.version =:= V
+                andalso Loaded#evoq_snapshot.data =:= Data
         end)).
 
 %%====================================================================
@@ -100,22 +101,24 @@ prop_chain_continuity() ->
             walk_chain(Events, Genesis)
         end)).
 
-%% Snapshot saved against an integrity-enabled store: load returns the
-%% same data + version + a populated anchor_hash + a populated mac.
+%% Snapshot saved against an integrity-enabled store: load returns
+%% the same data + version through the adapter; anchor_hash + mac are
+%% storage-only and verified separately via the raw snapshot record.
 prop_integrity_snapshot_roundtrip() ->
     ?FORALL({N, StreamId, Key}, {event_count(), stream_id(), key()},
         with_integrity_store(Key, fun(StoreId) ->
             seed(StoreId, StreamId, N),
             SnapVersion = N - 1,
             Data = #{state => running, n => N},
-            ok = mem_evoq_adapter:save_snapshot(
+            ok = mem_evoq_adapter:save(
                 StoreId, StreamId, SnapVersion, Data, #{}),
-            {ok, Loaded} = mem_evoq_adapter:load_snapshot(StoreId, StreamId),
-            Loaded#snapshot.version =:= SnapVersion
-                andalso Loaded#snapshot.data =:= Data
-                andalso is_binary(Loaded#snapshot.anchor_hash)
-                andalso byte_size(Loaded#snapshot.anchor_hash) =:= 32
-                andalso is_tuple(Loaded#snapshot.mac)
+            {ok, Loaded} = mem_evoq_adapter:read(StoreId, StreamId),
+            Raw = raw_snapshot(StoreId, StreamId, SnapVersion),
+            Loaded#evoq_snapshot.version =:= SnapVersion
+                andalso Loaded#evoq_snapshot.data =:= Data
+                andalso is_binary(Raw#snapshot.anchor_hash)
+                andalso byte_size(Raw#snapshot.anchor_hash) =:= 32
+                andalso is_tuple(Raw#snapshot.mac)
         end)).
 
 %%====================================================================
@@ -158,6 +161,15 @@ raw_events(StoreId, StreamId) ->
     State = sys:get_state(Pid),
     Streams = element(3, State),
     maps:get(StreamId, Streams, []).
+
+%% Raw #snapshot{} record — used by integrity property that asserts
+%% on anchor_hash + mac (storage-only, not propagated to evoq).
+raw_snapshot(StoreId, StreamId, Version) ->
+    {ok, Pid} = mem_evoq_registry:lookup(StoreId),
+    State = sys:get_state(Pid),
+    Snapshots = element(4, State),
+    PerStream = maps:get(StreamId, Snapshots),
+    maps:get(Version, PerStream).
 
 walk_chain([], _Prev) ->
     true;

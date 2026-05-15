@@ -163,8 +163,14 @@ handle_call({load_snapshot, StreamId, Version}, _From, State) ->
 handle_call({list_snapshots, StreamId}, _From, State) ->
     {reply, {ok, do_list_snapshots(StreamId, State)}, State};
 
+handle_call({list_snapshot_versions, StreamId}, _From, State) ->
+    {reply, {ok, do_list_snapshot_versions(StreamId, State)}, State};
+
 handle_call({delete_snapshot, StreamId}, _From, State) ->
     {reply, ok, do_delete_snapshots_for_stream(StreamId, State)};
+
+handle_call({delete_snapshot, StreamId, Version}, _From, State) ->
+    {reply, ok, do_delete_snapshot_at(StreamId, Version, State)};
 
 %%--------------------------------------------------------------------
 %% Other (further moves — pending)
@@ -784,9 +790,35 @@ snapshots_sorted(PerStream) ->
     Versions = lists:sort(maps:keys(PerStream)),
     [maps:get(V, PerStream) || V <- Versions].
 
+%% @private Versions only (ascending). Used by
+%% evoq_snapshot_adapter:list_versions/2.
+do_list_snapshot_versions(StreamId, #state{snapshots = All}) ->
+    versions_sorted(maps:get(StreamId, All, undefined)).
+
+versions_sorted(undefined) ->
+    [];
+versions_sorted(PerStream) ->
+    lists:sort(maps:keys(PerStream)).
+
 %% @private Delete all snapshots for a stream. Idempotent.
 do_delete_snapshots_for_stream(StreamId, #state{snapshots = All} = State) ->
     State#state{snapshots = maps:remove(StreamId, All)}.
+
+%% @private Delete a single version's snapshot. Idempotent —
+%% removes nothing if the stream / version are absent.
+do_delete_snapshot_at(StreamId, Version, #state{snapshots = All} = State) ->
+    State#state{snapshots = drop_version(
+        maps:get(StreamId, All, undefined), StreamId, Version, All)}.
+
+drop_version(undefined, _StreamId, _Version, All) ->
+    All;
+drop_version(PerStream, StreamId, Version, All) ->
+    reinsert_or_remove(maps:remove(Version, PerStream), StreamId, All).
+
+reinsert_or_remove(Empty, StreamId, All) when map_size(Empty) =:= 0 ->
+    maps:remove(StreamId, All);
+reinsert_or_remove(PerStream, StreamId, All) ->
+    maps:put(StreamId, PerStream, All).
 
 %%====================================================================
 %% Internal — snapshot integrity (move 16)

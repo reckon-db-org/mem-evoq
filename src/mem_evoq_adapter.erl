@@ -1,20 +1,26 @@
-%% @doc Adapter module implementing the `evoq_event_store' contract.
+%% @doc Adapter module implementing both the `evoq_event_store' surface
+%% and the `evoq_snapshot_adapter' behaviour.
 %%
 %% Configured into evoq via:
 %%
 %% ```
-%% application:set_env(evoq, event_store_adapter, mem_evoq_adapter).
+%% application:set_env(evoq, event_store_adapter, mem_evoq_adapter),
+%% application:set_env(evoq, snapshot_store_adapter, mem_evoq_adapter).
 %% '''
 %%
 %% Every callback looks up the store pid in {@link mem_evoq_registry}
 %% and forwards via `gen_server:call/2'. The store itself
 %% ({@link mem_evoq_store}) holds the actual state.
 %%
-%% This module is the public stable surface. The store gen_server's
-%% callback contract may evolve internally; the adapter's exports must
-%% not change without bumping the package's major version.
+%% Note that two seams cross this module: read paths translate
+%% `#event{}' to `#evoq_event{}' before returning; snapshot reads
+%% translate `#snapshot{}' to `#evoq_snapshot{}'. mac, signature and
+%% anchor_hash are intentionally NOT propagated — they are storage-
+%% layer concerns.
 %% @end
 -module(mem_evoq_adapter).
+
+-behaviour(evoq_snapshot_adapter).
 
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
 -include_lib("evoq/include/evoq_types.hrl").
@@ -38,15 +44,15 @@
     exists/2,
     has_events/1,
     list_streams/1,
-    delete/2,
+    delete_stream/2,
 
-    %% Snapshots
-    save_snapshot/3,
-    save_snapshot/5,
-    load_snapshot/2,
-    load_snapshot_at/3,
-    list_snapshots/2,
-    delete_snapshot/2,
+    %% evoq_snapshot_adapter callbacks
+    save/5,
+    read/2,
+    read_at_version/3,
+    delete/2,
+    delete_at_version/3,
+    list_versions/2,
 
     %% Subscriptions
     subscribe/4,
@@ -108,30 +114,30 @@ boolean_or_false(_)    -> false.
 list_streams(StoreId) ->
     call(StoreId, list_streams).
 
-delete(StoreId, StreamId) ->
+delete_stream(StoreId, StreamId) ->
     call(StoreId, {delete, StreamId}).
 
 %%====================================================================
-%% Snapshots
+%% Snapshots — evoq_snapshot_adapter behaviour
 %%====================================================================
 
-save_snapshot(StoreId, StreamId, Snapshot) ->
-    call(StoreId, {save_snapshot, StreamId, Snapshot}).
-
-save_snapshot(StoreId, StreamId, Version, Data, Metadata) ->
+save(StoreId, StreamId, Version, Data, Metadata) ->
     call(StoreId, {save_snapshot, StreamId, Version, Data, Metadata}).
 
-load_snapshot(StoreId, StreamId) ->
-    call(StoreId, {load_snapshot, StreamId}).
+read(StoreId, StreamId) ->
+    translate_snapshot(call(StoreId, {load_snapshot, StreamId})).
 
-load_snapshot_at(StoreId, StreamId, Version) ->
-    call(StoreId, {load_snapshot, StreamId, Version}).
+read_at_version(StoreId, StreamId, Version) ->
+    translate_snapshot(call(StoreId, {load_snapshot, StreamId, Version})).
 
-list_snapshots(StoreId, StreamId) ->
-    call(StoreId, {list_snapshots, StreamId}).
-
-delete_snapshot(StoreId, StreamId) ->
+delete(StoreId, StreamId) ->
     call(StoreId, {delete_snapshot, StreamId}).
+
+delete_at_version(StoreId, StreamId, Version) ->
+    call(StoreId, {delete_snapshot, StreamId, Version}).
+
+list_versions(StoreId, StreamId) ->
+    call(StoreId, {list_snapshot_versions, StreamId}).
 
 %%====================================================================
 %% Subscriptions
@@ -235,4 +241,30 @@ event_to_evoq(#event{
         data_content_type     = DataContentType,
         metadata_content_type = MetadataContentType,
         prev_event_hash       = PrevEventHash
+    }.
+
+%%====================================================================
+%% Internal — snapshot translation at the adapter boundary
+%%====================================================================
+%%
+%% Same shape as event translation. anchor_hash + mac are storage-only
+%% (they enable tamper detection during snapshot load — see
+%% mem_evoq_store) and intentionally NOT propagated to evoq consumers.
+
+translate_snapshot({ok, #snapshot{} = S}) -> {ok, snapshot_to_evoq(S)};
+translate_snapshot(Other)                  -> Other.
+
+snapshot_to_evoq(#snapshot{
+    stream_id = StreamId,
+    version   = Version,
+    data      = Data,
+    metadata  = Metadata,
+    timestamp = Timestamp
+}) ->
+    #evoq_snapshot{
+        stream_id = StreamId,
+        version   = Version,
+        data      = Data,
+        metadata  = Metadata,
+        timestamp = Timestamp
     }.

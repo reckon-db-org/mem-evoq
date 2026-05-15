@@ -1,6 +1,6 @@
 {application, mem_evoq, [
     {description, "In-memory event-store adapter for evoq"},
-    {vsn, "0.1.1"},
+    {vsn, "0.1.2"},
     {registered, []},
     {mod, {mem_evoq_app, []}},
     {applications, [

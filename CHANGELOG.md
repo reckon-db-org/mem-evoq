@@ -5,6 +5,24 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-05-15
+
+### Fixed
+
+- **Snapshot adapter contract**: 0.1.0 / 0.1.1 exposed `save_snapshot/3,5`, `load_snapshot/2`, `load_snapshot_at/3`, `list_snapshots/2`, `delete_snapshot/2`. None of those names match the `evoq_snapshot_adapter` callbacks evoq's `evoq_snapshot_store` actually calls. The adapter could not be wired as evoq's snapshot store; aggregate snapshotting end-to-end was broken.
+- mem_evoq_adapter now declares `-behaviour(evoq_snapshot_adapter)` and implements the canonical names: `save/5`, `read/2`, `read_at_version/3`, `delete/2`, `delete_at_version/3`, `list_versions/2`.
+- Snapshot reads translate `#snapshot{}` → `#evoq_snapshot{}` at the boundary. `anchor_hash` and `mac` are storage-only and intentionally NOT propagated.
+- Stream delete renamed: `mem_evoq_adapter:delete/2` (stream) → `mem_evoq_adapter:delete_stream/2`. The 2-arg `delete/2` now means snapshot delete-all (per behaviour).
+
+### Removed (pre-1.0 cleanup)
+
+- `save_snapshot/3` (record-taking variant; the 5-arg `save/5` covers it).
+- `load_snapshot/2`, `load_snapshot_at/3`, `delete_snapshot/2`, `list_snapshots/2` — all renamed per the behaviour. No backward shim because we just shipped 0.1.x hours ago.
+
+### Added
+
+- `test/integration/mem_evoq_evoq_seam_SUITE` gains three snapshot tests that drive through `evoq_snapshot_store` rather than the adapter directly — proving the contract works in both directions and locking the bug down.
+
 ## [0.1.1] - 2026-05-15
 
 ### Fixed

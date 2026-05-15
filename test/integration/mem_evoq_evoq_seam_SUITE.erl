@@ -32,7 +32,10 @@
          evoq_read_merges_payload_into_top_level/1,
          evoq_read_empty_stream_surfaces_error/1,
          evoq_read_of_integrity_enabled_carries_prev_event_hash/1,
-         evoq_read_of_legacy_stream_has_undefined_prev_event_hash/1]).
+         evoq_read_of_legacy_stream_has_undefined_prev_event_hash/1,
+         evoq_snapshot_save_load_roundtrip/1,
+         evoq_snapshot_load_returns_flat_map/1,
+         evoq_snapshot_not_found_propagates/1]).
 
 %%====================================================================
 %% CT boilerplate
@@ -46,13 +49,17 @@ all() ->
      evoq_read_merges_payload_into_top_level,
      evoq_read_empty_stream_surfaces_error,
      evoq_read_of_integrity_enabled_carries_prev_event_hash,
-     evoq_read_of_legacy_stream_has_undefined_prev_event_hash].
+     evoq_read_of_legacy_stream_has_undefined_prev_event_hash,
+     evoq_snapshot_save_load_roundtrip,
+     evoq_snapshot_load_returns_flat_map,
+     evoq_snapshot_not_found_propagates].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(crypto),
     {ok, _} = application:ensure_all_started(mem_evoq),
-    %% Plumb the adapter into evoq for the suite.
+    %% Plumb the adapter into BOTH evoq seams for the suite.
     ok = evoq_event_store:set_adapter(mem_evoq_adapter),
+    ok = evoq_snapshot_store:set_adapter(mem_evoq_adapter),
     Config.
 
 end_per_suite(_Config) -> ok.
@@ -181,4 +188,57 @@ evoq_read_of_legacy_stream_has_undefined_prev_event_hash(Config) ->
         StoreId, <<"agg-leg">>, 0, 10, forward),
 
     ?assertEqual(undefined, maps:get(prev_event_hash, E)),
+    ok.
+
+%%--------------------------------------------------------------------
+%% Snapshot seam — these tests exist to lock down the 0.1.2 fix.
+%% Until 0.1.2, mem_evoq_adapter exposed `save_snapshot' / `load_snapshot'
+%% which evoq_snapshot_store does not call. evoq cannot wire mem_evoq
+%% as its snapshot_store_adapter unless these tests pass.
+%%--------------------------------------------------------------------
+
+evoq_snapshot_save_load_roundtrip(Config) ->
+    StoreId = ?config(store_id, Config),
+    {ok, _} = mem_evoq:start_store(StoreId),
+
+    %% Drive through the high-level evoq snapshot API — same code path
+    %% an aggregate's snapshotting hook would use.
+    ok = evoq_snapshot_store:save(
+        StoreId, <<"agg-snap">>, 7,
+        #{counter => 42, state => running},
+        #{trace_id => <<"t-1">>}),
+
+    {ok, Loaded} = evoq_snapshot_store:load(StoreId, <<"agg-snap">>),
+    ?assert(is_map(Loaded)),
+    ?assertEqual(<<"agg-snap">>, maps:get(stream_id, Loaded)),
+    ?assertEqual(7, maps:get(version, Loaded)),
+    ?assertEqual(#{counter => 42, state => running}, maps:get(data, Loaded)),
+    ?assertEqual(#{trace_id => <<"t-1">>}, maps:get(metadata, Loaded)),
+    ok.
+
+%% evoq's snapshot_store:load/2 promises a flat map. The adapter
+%% returning the wrong record type would crash snapshot_to_map/1
+%% with function_clause — that's the bug this test guards.
+evoq_snapshot_load_returns_flat_map(Config) ->
+    StoreId = ?config(store_id, Config),
+    {ok, _} = mem_evoq:start_store(StoreId),
+
+    ok = evoq_snapshot_store:save(
+        StoreId, <<"agg-flatmap">>, 0, #{}, #{}),
+    {ok, M} = evoq_snapshot_store:load(StoreId, <<"agg-flatmap">>),
+
+    ?assert(is_map(M)),
+    %% Envelope keys present.
+    [?assert(maps:is_key(K, M))
+     || K <- [stream_id, version, data, metadata, timestamp]],
+    ok.
+
+evoq_snapshot_not_found_propagates(Config) ->
+    StoreId = ?config(store_id, Config),
+    {ok, _} = mem_evoq:start_store(StoreId),
+
+    ?assertMatch({error, not_found},
+        evoq_snapshot_store:load(StoreId, <<"never-snapped">>)),
+    ?assertMatch({error, not_found},
+        evoq_snapshot_store:load(StoreId, <<"never-snapped">>, 7)),
     ok.

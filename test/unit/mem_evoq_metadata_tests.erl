@@ -102,7 +102,7 @@ has_events_after_delete_of_only_stream_returns_false_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"s$1">>, 1),
         ?assertEqual(true, mem_evoq_adapter:has_events(StoreId)),
-        ok = mem_evoq_adapter:delete(StoreId, <<"s$1">>),
+        ok = mem_evoq_adapter:delete_stream(StoreId, <<"s$1">>),
         ?assertEqual(false, mem_evoq_adapter:has_events(StoreId))
     end).
 
@@ -128,7 +128,7 @@ list_streams_after_delete_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"a$1">>, 1),
         seed(StoreId, <<"b$1">>, 1),
-        ok = mem_evoq_adapter:delete(StoreId, <<"a$1">>),
+        ok = mem_evoq_adapter:delete_stream(StoreId, <<"a$1">>),
         {ok, Streams} = mem_evoq_adapter:list_streams(StoreId),
         ?assertEqual([<<"b$1">>], Streams)
     end).
@@ -141,29 +141,29 @@ delete_removes_stream_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"s$1">>, 3),
         ?assertEqual(true, mem_evoq_adapter:exists(StoreId, <<"s$1">>)),
-        ok = mem_evoq_adapter:delete(StoreId, <<"s$1">>),
+        ok = mem_evoq_adapter:delete_stream(StoreId, <<"s$1">>),
         ?assertEqual(false, mem_evoq_adapter:exists(StoreId, <<"s$1">>))
     end).
 
 delete_makes_read_return_stream_not_found_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"s$1">>, 3),
-        ok = mem_evoq_adapter:delete(StoreId, <<"s$1">>),
+        ok = mem_evoq_adapter:delete_stream(StoreId, <<"s$1">>),
         ?assertEqual({error, {stream_not_found, <<"s$1">>}},
                      mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 10, forward))
     end).
 
 delete_is_idempotent_for_missing_stream_test() ->
     with_store(fun(StoreId) ->
-        ?assertEqual(ok, mem_evoq_adapter:delete(StoreId, <<"never_existed$1">>)),
-        ?assertEqual(ok, mem_evoq_adapter:delete(StoreId, <<"never_existed$1">>))
+        ?assertEqual(ok, mem_evoq_adapter:delete_stream(StoreId, <<"never_existed$1">>)),
+        ?assertEqual(ok, mem_evoq_adapter:delete_stream(StoreId, <<"never_existed$1">>))
     end).
 
 delete_does_not_affect_other_streams_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"a$1">>, 3),
         seed(StoreId, <<"b$1">>, 3),
-        ok = mem_evoq_adapter:delete(StoreId, <<"a$1">>),
+        ok = mem_evoq_adapter:delete_stream(StoreId, <<"a$1">>),
         ?assertEqual(false, mem_evoq_adapter:exists(StoreId, <<"a$1">>)),
         ?assertEqual(true,  mem_evoq_adapter:exists(StoreId, <<"b$1">>)),
         ?assertEqual(2,     mem_evoq_adapter:version(StoreId, <<"b$1">>))

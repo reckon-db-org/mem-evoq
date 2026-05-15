@@ -1,10 +1,20 @@
 %%% @doc Unit tests for snapshot integrity (move 16) and subscription
 %%% catch-up verification (move 17) on mem_evoq_store.
+%%%
+%%% Two record types appear here:
+%%%
+%%%   * `#snapshot{}'      — storage-internal. Carries anchor_hash + mac.
+%%%                          Reached via sys:get_state / sys:replace_state
+%%%                          in the tamper helpers.
+%%%   * `#evoq_snapshot{}' — what the adapter returns after translation.
+%%%                          Carries stream_id / version / data /
+%%%                          metadata / timestamp only.
 %%% @end
 -module(mem_evoq_integrity_snapshot_tests).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Fixture
@@ -36,6 +46,16 @@ seed(StoreId, StreamId, N) ->
               || I <- lists:seq(1, N)],
     {ok, _} = mem_evoq_adapter:append(StoreId, StreamId, ?ANY_VERSION, Events),
     ok.
+
+%% Reach into the store and pull the raw #snapshot{} record at a
+%% specific (stream, version). Tests need this to inspect anchor_hash
+%% + mac, which the adapter strips.
+raw_snapshot(StoreId, StreamId, Version) ->
+    {ok, Pid} = mem_evoq_registry:lookup(StoreId),
+    State = sys:get_state(Pid),
+    Snapshots = element(4, State),
+    PerStream = maps:get(StreamId, Snapshots),
+    maps:get(Version, PerStream).
 
 tamper_event(StoreId, StreamId, Version, Fun) ->
     {ok, Pid} = mem_evoq_registry:lookup(StoreId),
@@ -69,24 +89,26 @@ drain_events(Timeout) ->
     end.
 
 %%====================================================================
-%% Move 16 — snapshot save populates anchor + mac
+%% Move 16 — snapshot save populates anchor + mac (storage-side)
 %%====================================================================
 
-save_populates_anchor_and_mac_test() ->
+save_populates_anchor_and_mac_in_storage_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 3),
-        ok = mem_evoq_adapter:save_snapshot(
+        ok = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 2, #{state => x}, #{}),
-        {ok, Snap} = mem_evoq_adapter:load_snapshot(StoreId, <<"s$1">>),
-        ?assert(is_binary(Snap#snapshot.anchor_hash)),
-        ?assertEqual(32, byte_size(Snap#snapshot.anchor_hash)),
-        ?assertMatch({1, _}, Snap#snapshot.mac)
+        %% Inspect storage-side record directly — anchor + mac don't
+        %% cross the adapter boundary.
+        Raw = raw_snapshot(StoreId, <<"s$1">>, 2),
+        ?assert(is_binary(Raw#snapshot.anchor_hash)),
+        ?assertEqual(32, byte_size(Raw#snapshot.anchor_hash)),
+        ?assertMatch({1, _}, Raw#snapshot.mac)
     end).
 
 save_refuses_when_event_absent_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 3),
-        Result = mem_evoq_adapter:save_snapshot(
+        Result = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 99, #{}, #{}),
         ?assertMatch({error, {snapshot_anchor_unavailable, _}}, Result)
     end).
@@ -98,19 +120,20 @@ save_refuses_when_event_absent_test() ->
 intact_snapshot_loads_clean_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 5),
-        ok = mem_evoq_adapter:save_snapshot(
+        ok = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 4, #{state => x}, #{}),
-        {ok, _Snap} = mem_evoq_adapter:load_snapshot(StoreId, <<"s$1">>)
+        {ok, Loaded} = mem_evoq_adapter:read(StoreId, <<"s$1">>),
+        ?assertEqual(4, Loaded#evoq_snapshot.version)
     end).
 
 tampered_snapshot_data_caught_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 5),
-        ok = mem_evoq_adapter:save_snapshot(
+        ok = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 4, #{state => x}, #{}),
         ok = tamper_snapshot(StoreId, <<"s$1">>, 4,
             fun(S) -> S#snapshot{data = #{forged => true}} end),
-        Result = mem_evoq_adapter:load_snapshot(StoreId, <<"s$1">>),
+        Result = mem_evoq_adapter:read(StoreId, <<"s$1">>),
         ?assertMatch({error, {integrity_violation,
                               #{kind := snapshot_mac_mismatch}}}, Result)
     end).
@@ -118,11 +141,11 @@ tampered_snapshot_data_caught_test() ->
 tampered_snapshot_anchor_caught_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 5),
-        ok = mem_evoq_adapter:save_snapshot(
+        ok = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 4, #{state => x}, #{}),
         ok = tamper_snapshot(StoreId, <<"s$1">>, 4,
             fun(S) -> S#snapshot{anchor_hash = <<99:256>>} end),
-        Result = mem_evoq_adapter:load_snapshot(StoreId, <<"s$1">>),
+        Result = mem_evoq_adapter:read(StoreId, <<"s$1">>),
         ?assertMatch({error, {integrity_violation,
                               #{kind := snapshot_anchor_mismatch}}}, Result)
     end).
@@ -133,7 +156,7 @@ tampered_underlying_stream_breaks_snapshot_anchor_test() ->
     %% the legitimate key) breaks the anchor.
     with_integrity_store(fun(StoreId, Key) ->
         seed(StoreId, <<"s$1">>, 5),
-        ok = mem_evoq_adapter:save_snapshot(
+        ok = mem_evoq_adapter:save(
             StoreId, <<"s$1">>, 4, #{state => intact}, #{}),
         %% Re-sign event 4 with new data under the legitimate key —
         %% individual MAC will pass but the recomputed chain_hash
@@ -145,7 +168,7 @@ tampered_underlying_stream_breaks_snapshot_anchor_test() ->
                 Mac = reckon_gater_integrity:compute_event_mac(E2, Key),
                 E2#event{mac = Mac}
             end),
-        Result = mem_evoq_adapter:load_snapshot(StoreId, <<"s$1">>),
+        Result = mem_evoq_adapter:read(StoreId, <<"s$1">>),
         ?assertMatch({error, {integrity_violation,
                               #{kind := snapshot_anchor_mismatch}}}, Result)
     end).
