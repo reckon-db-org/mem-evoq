@@ -84,7 +84,10 @@ handle_call({append, StreamId, ExpectedVersion, Events}, _From, State) ->
 %%--------------------------------------------------------------------
 
 handle_call({read, StreamId, FromVersion, Count, Direction}, _From, State) ->
-    {reply, do_read(StreamId, FromVersion, Count, Direction, State), State};
+    {reply, do_read(StreamId, FromVersion, Count, Direction, #{}, State), State};
+
+handle_call({read, StreamId, FromVersion, Count, Direction, Opts}, _From, State) ->
+    {reply, do_read(StreamId, FromVersion, Count, Direction, Opts, State), State};
 
 %%--------------------------------------------------------------------
 %% Stream metadata
@@ -238,21 +241,28 @@ check_expected_version(Expected, Current) ->
 append_events_to_stream(StreamId, CurrentVersion, Events, State) ->
     Now = erlang:system_time(millisecond),
     EpochUs = erlang:system_time(microsecond),
-    {Recorded, FinalVersion} = lists:foldl(
-        fun(Event, {Acc, AccVer}) ->
+    IntegrityCtx = setup_integrity_for_append(StreamId, CurrentVersion, State),
+    InitialTip = resolve_write_initial_tip(
+        StreamId, CurrentVersion + 1, IntegrityCtx, State),
+    {Recorded, FinalVersion, _FinalTip} = lists:foldl(
+        fun(Event, {Acc, AccVer, AccTip}) ->
             NewVer = AccVer + 1,
-            Record = create_event_record(Event, StreamId, NewVer, Now, EpochUs),
-            {[Record | Acc], NewVer}
+            Record0 = create_event_record(Event, StreamId, NewVer, Now, EpochUs),
+            {Record, NextTip} = apply_integrity_if_enabled(
+                Record0, AccTip, IntegrityCtx),
+            {[Record | Acc], NewVer, NextTip}
         end,
-        {[], CurrentVersion},
+        {[], CurrentVersion, InitialTip},
         Events
     ),
     %% Acc is reverse-order; reverse and prepend in correct order.
     AppendList = lists:reverse(Recorded),
     NewStreams = maps_update_append(StreamId, AppendList, State#state.streams),
-    NewState = State#state{streams = NewStreams},
-    %% Fan out to live subscribers (move 10) — synchronous send per
-    %% subscriber. Filter matching applied per event.
+    %% Persist the watermark side-effect from setup_integrity_for_append
+    %% (only matters on integrity-enabled stores, no-op otherwise).
+    NewIntegrity = persist_watermark(StreamId, IntegrityCtx, State#state.integrity),
+    NewState = State#state{streams = NewStreams, integrity = NewIntegrity},
+    %% Fan out to live subscribers — synchronous send per subscriber.
     ok = fanout_to_subscribers(AppendList, NewState),
     {ok, FinalVersion, NewState}.
 
@@ -327,20 +337,137 @@ hex_digit(D)             -> $a + D - 10.
 %% Stream-not-found returns `{error, {stream_not_found, StreamId}}'.
 %% Out-of-range requests return a partial result (no padding, no error).
 -spec do_read(
-    binary(), non_neg_integer(), pos_integer(), forward | backward, #state{}
+    binary(), non_neg_integer(), pos_integer(), forward | backward,
+    map(), #state{}
 ) -> {ok, [event()]} | {error, term()}.
-do_read(StreamId, FromVersion, Count, Direction, #state{streams = Streams})
+do_read(StreamId, FromVersion, Count, Direction, Opts,
+        #state{streams = Streams} = State)
         when is_integer(FromVersion), FromVersion >= 0,
              is_integer(Count), Count > 0,
-             (Direction =:= forward orelse Direction =:= backward) ->
+             (Direction =:= forward orelse Direction =:= backward),
+             is_map(Opts) ->
     case maps:get(StreamId, Streams, undefined) of
         undefined ->
             {error, {stream_not_found, StreamId}};
         Events when is_list(Events) ->
-            {ok, slice_events(Events, FromVersion, Count, Direction)}
+            Sliced = slice_events(Events, FromVersion, Count, Direction),
+            case maybe_verify_read(StreamId, FromVersion, Direction,
+                                   Sliced, Opts, State) of
+                {ok, Verified}  -> {ok, Verified};
+                {error, _} = Err -> Err
+            end
     end;
-do_read(_StreamId, _FromVersion, _Count, _Direction, _State) ->
+do_read(_StreamId, _FromVersion, _Count, _Direction, _Opts, _State) ->
     {error, badarg}.
+
+%%--------------------------------------------------------------------
+%% Read-path verification (move 15)
+%%--------------------------------------------------------------------
+
+maybe_verify_read(StreamId, FromVersion, Direction, Events, Opts, State) ->
+    Mode = maps:get(verify, Opts, skip_legacy),
+    case verify_required(State#state.integrity, Mode) of
+        false ->
+            {ok, Events};
+        true ->
+            case verify_in_direction(StreamId, FromVersion, Direction,
+                                     Events, Mode, State) of
+                {ok, _} = Ok -> Ok;
+                {integrity_violation, _} = Violation ->
+                    {error, Violation}
+            end
+    end.
+
+verify_required(disabled, _Mode) -> false;
+verify_required(_, skip_all)     -> false;
+verify_required(_, _)            -> true.
+
+verify_in_direction(StreamId, FromVersion, forward, Events, Mode, State) ->
+    verify_events_forward(StreamId, FromVersion, Events, Mode, State);
+verify_in_direction(StreamId, FromVersion, backward, Events, Mode, State) ->
+    %% Same trick as reckon-db 2.1.1: reverse to forward, verify, reverse back.
+    Forward = lists:reverse(Events),
+    ForwardStart = case Forward of
+        [] -> FromVersion;
+        [#event{version = V} | _] -> V
+    end,
+    case verify_events_forward(StreamId, ForwardStart, Forward, Mode, State) of
+        {ok, Verified} ->
+            {ok, lists:reverse(Verified)};
+        Violation ->
+            Violation
+    end.
+
+verify_events_forward(StreamId, StartVersion, Events, Mode,
+                      #state{integrity = #{key := Key, chain_start := WMs},
+                             streams = Streams}) ->
+    ChainStart = maps:get(StreamId, WMs, undefined),
+    InitialTip = resolve_read_initial_tip(
+        StreamId, StartVersion, ChainStart, Streams),
+    verify_events_loop(Events, InitialTip, ChainStart, Key, Mode, StreamId, []).
+
+%% Mirrors reckon_db_streams:resolve_read_initial_tip/4 — see that
+%% module for the rationale on each branch.
+resolve_read_initial_tip(_StreamId, _StartVersion, undefined, _Streams) ->
+    undefined;
+resolve_read_initial_tip(_StreamId, StartVersion, ChainStart, _Streams)
+        when StartVersion < ChainStart ->
+    undefined;
+resolve_read_initial_tip(_StreamId, StartVersion, ChainStart, _Streams)
+        when StartVersion =:= ChainStart ->
+    reckon_gater_integrity:genesis_prev_hash();
+resolve_read_initial_tip(StreamId, StartVersion, _ChainStart, Streams)
+        when StartVersion > 0 ->
+    %% Predecessor must be on disk and integrity-bearing; look it up
+    %% in the live in-memory streams map.
+    PrevVersion = StartVersion - 1,
+    case find_event_at(maps:get(StreamId, Streams, []), PrevVersion) of
+        {ok, #event{prev_event_hash = PrevPrev} = E} when is_binary(PrevPrev) ->
+            reckon_gater_integrity:compute_chain_hash(E, PrevPrev);
+        _ ->
+            undefined
+    end.
+
+verify_events_loop([], _Tip, _ChainStart, _Key, _Mode, _StreamId, Acc) ->
+    {ok, lists:reverse(Acc)};
+verify_events_loop([Event | Rest], Tip, ChainStart, Key, Mode, StreamId, Acc) ->
+    case is_legacy_event(Event, ChainStart) of
+        true ->
+            handle_legacy(Event, Rest, Tip, ChainStart, Key, Mode, StreamId, Acc);
+        false ->
+            handle_integrity(Event, Rest, Tip, ChainStart, Key, Mode, StreamId, Acc)
+    end.
+
+is_legacy_event(_Event, undefined) -> true;
+is_legacy_event(#event{version = V}, ChainStart) -> V < ChainStart.
+
+handle_legacy(Event, _Rest, _Tip, _ChainStart, _Key, strict, StreamId, _Acc) ->
+    {integrity_violation, #{
+        layer => storage,
+        stream_id => StreamId,
+        version => Event#event.version,
+        kind => missing_integrity,
+        context => #{detail => legacy_event_under_strict_mode}
+    }};
+handle_legacy(Event, Rest, Tip, ChainStart, Key, Mode, StreamId, Acc) ->
+    verify_events_loop(Rest, Tip, ChainStart, Key, Mode, StreamId, [Event | Acc]).
+
+handle_integrity(Event, Rest, undefined, ChainStart, Key, Mode, StreamId, Acc)
+        when is_integer(ChainStart),
+             Event#event.version =:= ChainStart ->
+    %% First integrity event in the stream — seed tip with genesis.
+    Genesis = reckon_gater_integrity:genesis_prev_hash(),
+    handle_integrity(Event, Rest, Genesis, ChainStart, Key, Mode, StreamId, Acc);
+handle_integrity(Event, Rest, Tip, ChainStart, Key, Mode, StreamId, Acc)
+        when is_binary(Tip) ->
+    case reckon_gater_integrity:verify_event(Event, Tip, Key) of
+        ok ->
+            NextTip = reckon_gater_integrity:compute_chain_hash(Event, Tip),
+            verify_events_loop(
+                Rest, NextTip, ChainStart, Key, Mode, StreamId, [Event | Acc]);
+        {integrity_violation, _} = V ->
+            V
+    end.
 
 %% List is in forward order (oldest first); filter into the requested
 %% window, then reverse for backward reads so callers get the natural
@@ -618,3 +745,89 @@ init_integrity(#{enabled := true, key := Key}) when is_binary(Key) ->
     {error, {integrity_key_invalid_size, byte_size(Key)}};
 init_integrity(_) ->
     {error, integrity_config_invalid}.
+
+%%====================================================================
+%% Internal — write-path integrity (move 14)
+%%====================================================================
+
+%% @private Determine the integrity context for a single append batch.
+%% For disabled stores this is the constant atom `disabled' (the
+%% per-event code paths short-circuit on it). For enabled stores we
+%% resolve (or lazily set) the per-stream chain_start watermark and
+%% return it along with the key so the per-event helpers don't have
+%% to keep hitting state.
+-type integrity_ctx() ::
+    disabled |
+    {enabled, Key :: binary(), ChainStart :: non_neg_integer()}.
+
+-spec setup_integrity_for_append(binary(), integer(), #state{}) ->
+    integrity_ctx().
+setup_integrity_for_append(_StreamId, _CurrentVersion, #state{integrity = disabled}) ->
+    disabled;
+setup_integrity_for_append(StreamId, CurrentVersion,
+                           #state{integrity = #{key := Key, chain_start := Map}}) ->
+    NextVersion = CurrentVersion + 1,
+    %% Lazy enablement: if the stream has no watermark, the upcoming
+    %% append becomes the first integrity-bearing event in that stream.
+    ChainStart = case maps:get(StreamId, Map, undefined) of
+        undefined -> NextVersion;
+        V -> V
+    end,
+    {enabled, Key, ChainStart}.
+
+%% @private Persist the chain_start watermark set during setup. No-op
+%% for stores where integrity is disabled.
+persist_watermark(_StreamId, disabled, _Integrity) ->
+    disabled;
+persist_watermark(StreamId, {enabled, _Key, ChainStart},
+                  #{chain_start := Map} = Integrity) ->
+    Integrity#{chain_start := maps:put(StreamId, ChainStart, Map)}.
+
+%% @private Resolve the chain-tip value that the first event in this
+%% batch must reference as its `prev_event_hash'.
+%%
+%% Disabled: undefined (unused).
+%% Enabled, first integrity event in stream: genesis.
+%% Enabled, later batch: chain hash of the predecessor on disk.
+-spec resolve_write_initial_tip(
+    binary(), non_neg_integer(), integrity_ctx(), #state{}
+) -> binary() | undefined.
+resolve_write_initial_tip(_StreamId, _NextVersion, disabled, _State) ->
+    undefined;
+resolve_write_initial_tip(_StreamId, NextVersion, {enabled, _Key, ChainStart}, _State)
+        when NextVersion =:= ChainStart ->
+    reckon_gater_integrity:genesis_prev_hash();
+resolve_write_initial_tip(StreamId, NextVersion, {enabled, _Key, ChainStart},
+                          #state{streams = Streams})
+        when NextVersion > ChainStart ->
+    PrevVersion = NextVersion - 1,
+    case find_event_at(maps:get(StreamId, Streams, []), PrevVersion) of
+        {ok, #event{prev_event_hash = PrevPrevHash} = PrevEvent}
+                when is_binary(PrevPrevHash) ->
+            reckon_gater_integrity:compute_chain_hash(PrevEvent, PrevPrevHash);
+        _ ->
+            erlang:error({integrity_setup_failed,
+                          #{stream_id => StreamId,
+                            looking_for_version => PrevVersion,
+                            chain_start => ChainStart}})
+    end.
+
+find_event_at([], _Version) -> error;
+find_event_at([#event{version = V} = E | _], V) -> {ok, E};
+find_event_at([#event{version = V} | _], Target) when V > Target -> error;
+find_event_at([_ | Rest], Target) -> find_event_at(Rest, Target).
+
+%% @private Compute and attach integrity fields for one event. For
+%% disabled stores this is a pass-through.
+-spec apply_integrity_if_enabled(
+    event(), binary() | undefined, integrity_ctx()
+) -> {event(), binary() | undefined}.
+apply_integrity_if_enabled(Event, _Tip, disabled) ->
+    {Event, undefined};
+apply_integrity_if_enabled(Event, Tip, {enabled, Key, _ChainStart})
+        when is_binary(Tip) ->
+    Event1 = Event#event{prev_event_hash = Tip},
+    Mac = reckon_gater_integrity:compute_event_mac(Event1, Key),
+    Event2 = Event1#event{mac = Mac},
+    NextTip = reckon_gater_integrity:compute_chain_hash(Event2, Tip),
+    {Event2, NextTip}.
