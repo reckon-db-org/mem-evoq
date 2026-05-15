@@ -8,6 +8,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Fixture
@@ -42,10 +43,10 @@ seed(StoreId, StreamId, N) ->
 %% Extract the n field from an event's data — a convenient
 %% identity for asserting which events came back.
 ns(Events) ->
-    [maps:get(n, E#event.data) || E <- Events].
+    [maps:get(n, E#evoq_event.data) || E <- Events].
 
 versions(Events) ->
-    [E#event.version || E <- Events].
+    [E#evoq_event.version || E <- Events].
 
 %%====================================================================
 %% Stream-not-found
@@ -167,8 +168,8 @@ read_single_event_test() ->
     with_store(fun(StoreId) ->
         seed(StoreId, <<"s$1">>, 1),
         {ok, [E]} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 1, forward),
-        ?assertEqual(0, E#event.version),
-        ?assertEqual(<<"s$1">>, E#event.stream_id)
+        ?assertEqual(0, E#evoq_event.version),
+        ?assertEqual(<<"s$1">>, E#evoq_event.stream_id)
     end).
 
 %%====================================================================
@@ -184,8 +185,8 @@ read_isolates_streams_test() ->
         ?assertEqual(3, length(A)),
         ?assertEqual(5, length(B)),
         %% Cross-check: no event from b should appear in a's result.
-        ?assert(lists:all(fun(E) -> E#event.stream_id =:= <<"a$1">> end, A)),
-        ?assert(lists:all(fun(E) -> E#event.stream_id =:= <<"b$1">> end, B))
+        ?assert(lists:all(fun(E) -> E#evoq_event.stream_id =:= <<"a$1">> end, A)),
+        ?assert(lists:all(fun(E) -> E#evoq_event.stream_id =:= <<"b$1">> end, B))
     end).
 
 %%====================================================================
@@ -201,8 +202,8 @@ append_read_roundtrip_preserves_fields_test() ->
                metadata => #{trace_id => <<"t-1">>},
                tags => [<<"realm:test">>]}]),
         {ok, [E]} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 1, forward),
-        ?assertEqual(<<"foo_v1">>, E#event.event_type),
-        ?assertEqual(#{value => 42}, E#event.data),
-        ?assertEqual(#{trace_id => <<"t-1">>}, E#event.metadata),
-        ?assertEqual([<<"realm:test">>], E#event.tags)
+        ?assertEqual(<<"foo_v1">>, E#evoq_event.event_type),
+        ?assertEqual(#{value => 42}, E#evoq_event.data),
+        ?assertEqual(#{trace_id => <<"t-1">>}, E#evoq_event.metadata),
+        ?assertEqual([<<"realm:test">>], E#evoq_event.tags)
     end).

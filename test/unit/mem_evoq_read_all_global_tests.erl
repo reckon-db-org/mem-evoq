@@ -5,6 +5,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 setup() ->
     {ok, _} = application:ensure_all_started(mem_evoq),
@@ -58,7 +59,7 @@ read_all_global_returns_events_in_epoch_order_test() ->
         %% the same epoch_us because they're written in a single
         %% append/4 call). We assert the cross-stream ordering: the
         %% first 3 are stream a, the next 3 are b, the last 3 are c.
-        StreamIds = [E#event.stream_id || E <- All],
+        StreamIds = [E#evoq_event.stream_id || E <- All],
         FirstThree = lists:sublist(StreamIds, 1, 3),
         MiddleThree = lists:sublist(StreamIds, 4, 3),
         LastThree = lists:sublist(StreamIds, 7, 3),
@@ -117,6 +118,6 @@ read_all_global_with_single_stream_returns_stream_order_test() ->
         seed(StoreId, <<"only$1">>, <<"e">>, 5),
         {ok, All} = mem_evoq_adapter:read_all_global(StoreId, 0, 100),
         ?assertEqual(5, length(All)),
-        Versions = [E#event.version || E <- All],
+        Versions = [E#evoq_event.version || E <- All],
         ?assertEqual([0,1,2,3,4], Versions)
     end).

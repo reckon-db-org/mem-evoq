@@ -4,11 +4,21 @@
 %%% store carry prev_event_hash + mac; reads verify both; tampered
 %%% events surface {error, {integrity_violation, _}} same shape as
 %%% reckon-db.
+%%%
+%%% Two record types appear here:
+%%%
+%%%   * `#event{}'      — storage-internal, includes mac + signature.
+%%%                       Used by sys:get_state inspection + tamper
+%%%                       helpers.
+%%%   * `#evoq_event{}' — what the adapter returns. mac and signature
+%%%                       are intentionally NOT propagated (storage
+%%%                       concerns).
 %%% @end
 -module(mem_evoq_integrity_tests).
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Fixture
@@ -41,6 +51,15 @@ seed(StoreId, StreamId, N) ->
     {ok, _} = mem_evoq_adapter:append(StoreId, StreamId, ?ANY_VERSION, Events),
     ok.
 
+%% Reach into the store's state and read out raw #event{} records for
+%% a stream. Bypasses the adapter's evoq translation — needed by tests
+%% that assert on mac / signature, which are storage-only.
+raw_events(StoreId, StreamId) ->
+    {ok, Pid} = mem_evoq_registry:lookup(StoreId),
+    State = sys:get_state(Pid),
+    Streams = element(3, State),
+    maps:get(StreamId, Streams).
+
 %% Reach into the store's state to tamper an event directly — what an
 %% on-disk attacker would do, bypassing all the API guards.
 %% sys:replace_state returns the new state; we discard it here and
@@ -62,14 +81,24 @@ tamper_event(StoreId, StreamId, Version, Fun) ->
 %% Move 14 — write-path populates integrity fields
 %%====================================================================
 
-write_populates_prev_event_hash_and_mac_test() ->
+%% Adapter-visible: prev_event_hash is propagated to evoq events.
+write_populates_prev_event_hash_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 3),
         {ok, Events} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 10, forward),
         ?assertEqual(3, length(Events)),
-        [?assert(is_binary(E#event.prev_event_hash)) || E <- Events],
-        [?assertMatch({1, _}, E#event.mac) || E <- Events],
-        [?assertEqual(32, byte_size(element(2, E#event.mac))) || E <- Events]
+        [?assert(is_binary(E#evoq_event.prev_event_hash)) || E <- Events]
+    end).
+
+%% Storage-only: mac lives on the internal #event{} record and is not
+%% propagated through the adapter. Inspect via sys:get_state.
+write_populates_mac_in_storage_test() ->
+    with_integrity_store(fun(StoreId, _Key) ->
+        seed(StoreId, <<"s$1">>, 3),
+        Raw = raw_events(StoreId, <<"s$1">>),
+        ?assertEqual(3, length(Raw)),
+        [?assertMatch({1, _}, E#event.mac) || E <- Raw],
+        [?assertEqual(32, byte_size(element(2, E#event.mac))) || E <- Raw]
     end).
 
 first_event_prev_hash_is_genesis_test() ->
@@ -77,18 +106,19 @@ first_event_prev_hash_is_genesis_test() ->
         seed(StoreId, <<"s$1">>, 1),
         {ok, [E]} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 1, forward),
         ?assertEqual(reckon_gater_integrity:genesis_prev_hash(),
-                     E#event.prev_event_hash)
+                     E#evoq_event.prev_event_hash)
     end).
 
+%% Walks the chain end-to-end using reckon_gater_integrity primitives.
+%% These take #event{}, so fetch raw storage records.
 chain_continuity_across_batches_test() ->
     with_integrity_store(fun(StoreId, Key) ->
         seed(StoreId, <<"s$1">>, 2),
         seed(StoreId, <<"s$1">>, 3),  %% second batch
-        {ok, Events} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 10, forward),
-        ?assertEqual(5, length(Events)),
-        %% Walk the chain manually with the key — every link must verify.
+        Raw = raw_events(StoreId, <<"s$1">>),
+        ?assertEqual(5, length(Raw)),
         Genesis = reckon_gater_integrity:genesis_prev_hash(),
-        walk_and_verify(Events, Genesis, Key)
+        walk_and_verify(Raw, Genesis, Key)
     end).
 
 walk_and_verify([], _Tip, _Key) -> ok;
@@ -118,8 +148,10 @@ disabled_store_writes_no_integrity_fields_test() ->
     try
         seed(StoreId, <<"s$1">>, 2),
         {ok, Events} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 0, 10, forward),
-        [?assertEqual(undefined, E#event.prev_event_hash) || E <- Events],
-        [?assertEqual(undefined, E#event.mac) || E <- Events]
+        [?assertEqual(undefined, E#evoq_event.prev_event_hash) || E <- Events],
+        %% mac is storage-only — verify via raw inspection.
+        Raw = raw_events(StoreId, <<"s$1">>),
+        [?assertEqual(undefined, E#event.mac) || E <- Raw]
     after
         cleanup(StoreId)
     end.
@@ -187,7 +219,7 @@ backward_read_intact_returns_descending_test() ->
     with_integrity_store(fun(StoreId, _Key) ->
         seed(StoreId, <<"s$1">>, 5),
         {ok, Events} = mem_evoq_adapter:read(StoreId, <<"s$1">>, 4, 3, backward),
-        Versions = [E#event.version || E <- Events],
+        Versions = [E#evoq_event.version || E <- Events],
         ?assertEqual([4, 3, 2], Versions)
     end).
 
@@ -200,12 +232,8 @@ skip_all_returns_tampered_events_test() ->
         seed(StoreId, <<"s$1">>, 3),
         ok = tamper_event(StoreId, <<"s$1">>, 1,
             fun(E) -> E#event{data = #{forged => true}} end),
-        %% Strict-default would error; skip_all bypasses.
-        {ok, Pid} = mem_evoq_registry:lookup(StoreId),
-        %% Use the 6-arg call via the store gen_server directly since
-        %% the 4-arg adapter:read doesn't expose Opts. We test via the
-        %% direct call to lock down the verification mode behaviour.
-        Result = gen_server:call(Pid,
-            {read, <<"s$1">>, 0, 10, forward, #{verify => skip_all}}),
+        %% Adapter exposes the 6-arg form for verify mode control.
+        Result = mem_evoq_adapter:read(
+            StoreId, <<"s$1">>, 0, 10, forward, #{verify => skip_all}),
         ?assertMatch({ok, [_,_,_]}, Result)
     end).

@@ -5,6 +5,16 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-05-15
+
+### Fixed
+
+- **Adapter contract**: `mem_evoq_adapter` was returning raw reckon_gater `#event{}` records to evoq, but the `evoq_event_store` contract expects `#evoq_event{}` records (or maps). The mismatch made the adapter unusable when actually wired into evoq — `evoq_event_store:read/5` would crash with `function_clause` inside its `event_to_map/1` helper. 0.1.0 worked when called directly in mem-evoq's own tests but failed at the evoq seam.
+- Read paths (`read/5,6`, `read_all/3,4`, `read_all_global/3`, `read_by_event_types/3`, `read_by_tags/3,4`) now translate `#event{} → #evoq_event{}` at the adapter boundary.
+- Subscription delivery now goes through a per-subscription bridge process that translates `{events, [#event{}]}` → `{events, [#evoq_event{}]}` before forwarding. `subscription_error` messages (e.g. integrity violations during catch-up) pass through unchanged. Matches the pattern reckon-evoq uses.
+
+`mac` and `signature` are storage-only concerns and are intentionally NOT propagated through the adapter — same as reckon-evoq. Tests that assert on them now go through `sys:get_state` on the store gen_server.
+
 ## [0.1.0] - 2026-05-15
 
 Initial release. In-memory event-store adapter for [evoq](https://codeberg.org/reckon-db-org/evoq) — a reference implementation of the `evoq_event_store` callback contract, intended for tests, demos, and integration scaffolding without spinning up Khepri/Ra.

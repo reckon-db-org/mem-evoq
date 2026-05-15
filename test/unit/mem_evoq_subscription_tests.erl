@@ -14,6 +14,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 setup() ->
     {ok, _} = application:ensure_all_started(mem_evoq),
@@ -132,7 +133,7 @@ by_stream_filter_excludes_other_streams_test() ->
         seed(StoreId, <<"b$1">>, 5),  %% should NOT be delivered
         Events = drain_events(200),
         ?assertEqual(2, length(Events)),
-        [?assertEqual(<<"a$1">>, E#event.stream_id) || E <- Events]
+        [?assertEqual(<<"a$1">>, E#evoq_event.stream_id) || E <- Events]
     end).
 
 unsubscribe_stops_delivery_test() ->

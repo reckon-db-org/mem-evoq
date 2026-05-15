@@ -12,6 +12,7 @@
 
 -include_lib("proper/include/proper.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 %%====================================================================
 %% Generators
@@ -86,13 +87,15 @@ prop_backward_strict_matches_forward() ->
         end)).
 
 %% Every appended event's prev_event_hash equals the chain hash of
-%% its predecessor (or genesis for event 0).
+%% its predecessor (or genesis for event 0). Walked against raw
+%% #event{} records because compute_chain_hash needs the storage
+%% record (mac + signature carry signal the adapter strips on the
+%% way out).
 prop_chain_continuity() ->
     ?FORALL({N, StreamId, Key}, {event_count(), stream_id(), key()},
         with_integrity_store(Key, fun(StoreId) ->
             seed(StoreId, StreamId, N),
-            {ok, Events} = mem_evoq_adapter:read(
-                StoreId, StreamId, 0, N + 5, forward),
+            Events = raw_events(StoreId, StreamId),
             Genesis = reckon_gater_integrity:genesis_prev_hash(),
             walk_chain(Events, Genesis)
         end)).
@@ -143,10 +146,18 @@ seed(StoreId, StreamId, N) ->
     ok.
 
 versions_are(Events, Expected) ->
-    [E#event.version || E <- Events] =:= Expected.
+    [E#evoq_event.version || E <- Events] =:= Expected.
 
 event_ids(Events) ->
-    [E#event.event_id || E <- Events].
+    [E#evoq_event.event_id || E <- Events].
+
+%% Raw #event{} records straight out of the store's state — used by
+%% chain-walk properties that need the storage-side fields.
+raw_events(StoreId, StreamId) ->
+    {ok, Pid} = mem_evoq_registry:lookup(StoreId),
+    State = sys:get_state(Pid),
+    Streams = element(3, State),
+    maps:get(StreamId, Streams, []).
 
 walk_chain([], _Prev) ->
     true;

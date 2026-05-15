@@ -7,6 +7,13 @@
 %% produce no integrity fields, and the key actually flows through to
 %% the computed MAC.
 %%
+%% Two record types in play:
+%%
+%%   * `#event{}'      — storage-internal (reckon_gater). Has mac +
+%%                       signature. Reached via sys:get_state.
+%%   * `#evoq_event{}' — what the adapter returns. mac + signature are
+%%                       intentionally NOT propagated (storage layer).
+%%
 %% Move 18 of the mem-evoq plan: the round-trip integration test.
 %% @end
 -module(mem_evoq_integrity_writes_SUITE).
@@ -14,6 +21,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 -export([all/0, suite/0,
          init_per_suite/1, end_per_suite/1,
@@ -72,10 +80,14 @@ disabled_store_writes_legacy_events(Config) ->
         StoreId, StreamId, ?NO_STREAM,
         [#{event_type => <<"x_happened">>, data => #{n => 1}}]),
 
-    {ok, [Event]} = mem_evoq_adapter:read(StoreId, StreamId, 0, 10, forward),
-    ?assertEqual(undefined, Event#event.prev_event_hash),
-    ?assertEqual(undefined, Event#event.mac),
-    ?assertEqual(undefined, Event#event.signature),
+    %% Adapter view: prev_event_hash propagated, undefined for legacy.
+    {ok, [EvoqEvent]} = mem_evoq_adapter:read(StoreId, StreamId, 0, 10, forward),
+    ?assertEqual(undefined, EvoqEvent#evoq_event.prev_event_hash),
+
+    %% mac + signature live on the storage-side #event{} record only.
+    [Raw] = raw_events(StoreId, StreamId),
+    ?assertEqual(undefined, Raw#event.mac),
+    ?assertEqual(undefined, Raw#event.signature),
     ok.
 
 %% First event in an integrity-enabled store: genesis prev_event_hash,
@@ -88,17 +100,18 @@ enabled_store_writes_integrity_fields(Config) ->
         StoreId, StreamId, ?NO_STREAM,
         [#{event_type => <<"x_happened">>, data => #{n => 1}}]),
 
-    {ok, [Event]} = mem_evoq_adapter:read(StoreId, StreamId, 0, 10, forward),
+    {ok, [EvoqEvent]} = mem_evoq_adapter:read(StoreId, StreamId, 0, 10, forward),
 
     Genesis = reckon_gater_integrity:genesis_prev_hash(),
-    ?assertEqual(Genesis, Event#event.prev_event_hash),
+    ?assertEqual(Genesis, EvoqEvent#evoq_event.prev_event_hash),
 
-    ?assertMatch({1, _}, Event#event.mac),
-    {1, MacBytes} = Event#event.mac,
+    %% MAC + verifier acceptance live on the raw storage record.
+    [Raw] = raw_events(StoreId, StreamId),
+    ?assertMatch({1, _}, Raw#event.mac),
+    {1, MacBytes} = Raw#event.mac,
     ?assertEqual(32, byte_size(MacBytes)),
-
     ?assertEqual(ok,
-        reckon_gater_integrity:verify_event(Event, Genesis, Key)),
+        reckon_gater_integrity:verify_event(Raw, Genesis, Key)),
 
     ?assertEqual(0, lookup_chain_start(StoreId, StreamId)),
     ok.
@@ -119,9 +132,9 @@ chain_continues_across_appends(Config) ->
          #{event_type => <<"e4">>, data => #{n => 4}},
          #{event_type => <<"e5">>, data => #{n => 5}}]),
 
-    {ok, Events} = mem_evoq_adapter:read(StoreId, StreamId, 0, 10, forward),
+    %% Walk via raw storage records — compute_chain_hash takes #event{}.
+    Events = raw_events(StoreId, StreamId),
     ?assertEqual(5, length(Events)),
-
     Genesis = reckon_gater_integrity:genesis_prev_hash(),
     walk_chain_and_verify(Events, Genesis, Key),
     ok.
@@ -150,7 +163,8 @@ watermark_is_recorded_on_first_append(Config) ->
     ?assertEqual(0, lookup_chain_start(StoreId, StreamA)),
     ok.
 
-%% Same payload, different keys → different MACs.
+%% Same payload, different keys → different MACs. Inspect via raw
+%% storage records.
 different_keys_produce_different_macs(Config) ->
     Store1 = ?config(store_id, Config),
     Store2 = list_to_atom(atom_to_list(Store1) ++ "_alt"),
@@ -164,12 +178,10 @@ different_keys_produce_different_macs(Config) ->
     EventPayload = #{event_type => <<"e">>, data => #{value => 42}},
 
     {ok, 0} = mem_evoq_adapter:append(Store1, StreamId, ?NO_STREAM, [EventPayload]),
-    {ok, [#event{mac = {_, Mac1}}]} =
-        mem_evoq_adapter:read(Store1, StreamId, 0, 10, forward),
+    [#event{mac = {_, Mac1}}] = raw_events(Store1, StreamId),
 
     {ok, 0} = mem_evoq_adapter:append(Store2, StreamId, ?NO_STREAM, [EventPayload]),
-    {ok, [#event{mac = {_, Mac2}}]} =
-        mem_evoq_adapter:read(Store2, StreamId, 0, 10, forward),
+    [#event{mac = {_, Mac2}}] = raw_events(Store2, StreamId),
 
     ?assertNotEqual(Mac1, Mac2),
 
@@ -206,6 +218,14 @@ setup_integrity_store(Config) ->
     {ok, _} = mem_evoq:start_store(
         StoreId, #{integrity => #{enabled => true, key => Key}}),
     {StoreId, Key}.
+
+%% Reach the raw #event{} records for a stream. The adapter strips
+%% mac + signature; assertions on those properties have to bypass it.
+raw_events(StoreId, StreamId) ->
+    {ok, Pid} = mem_evoq_registry:lookup(StoreId),
+    State = sys:get_state(Pid),
+    Streams = element(3, State),
+    maps:get(StreamId, Streams).
 
 %% mem-evoq keeps chain-start watermarks inside the store gen_server's
 %% state. The integration test peeks at them via sys:get_state — same

@@ -17,6 +17,7 @@
 -module(mem_evoq_adapter).
 
 -include_lib("reckon_gater/include/reckon_gater_types.hrl").
+-include_lib("evoq/include/evoq_types.hrl").
 
 -export([
     %% Write path
@@ -65,28 +66,28 @@ append(StoreId, StreamId, ExpectedVersion, Events) ->
 %%====================================================================
 
 read(StoreId, StreamId, FromVersion, Count, Direction) ->
-    call(StoreId, {read, StreamId, FromVersion, Count, Direction}).
+    translate_events(call(StoreId, {read, StreamId, FromVersion, Count, Direction})).
 
 read(StoreId, StreamId, FromVersion, Count, Direction, Opts) ->
-    call(StoreId, {read, StreamId, FromVersion, Count, Direction, Opts}).
+    translate_events(call(StoreId, {read, StreamId, FromVersion, Count, Direction, Opts})).
 
 read_all(StoreId, StreamId, Direction) ->
-    call(StoreId, {read_all, StreamId, Direction, 1000}).
+    translate_events(call(StoreId, {read_all, StreamId, Direction, 1000})).
 
 read_all(StoreId, StreamId, Direction, BatchSize) ->
-    call(StoreId, {read_all, StreamId, Direction, BatchSize}).
+    translate_events(call(StoreId, {read_all, StreamId, Direction, BatchSize})).
 
 read_all_global(StoreId, Offset, BatchSize) ->
-    call(StoreId, {read_all_global, Offset, BatchSize}).
+    translate_events(call(StoreId, {read_all_global, Offset, BatchSize})).
 
 read_by_event_types(StoreId, EventTypes, BatchSize) ->
-    call(StoreId, {read_by_event_types, EventTypes, BatchSize}).
+    translate_events(call(StoreId, {read_by_event_types, EventTypes, BatchSize})).
 
 read_by_tags(StoreId, Tags, BatchSize) ->
     read_by_tags(StoreId, Tags, any, BatchSize).
 
 read_by_tags(StoreId, Tags, Match, BatchSize) ->
-    call(StoreId, {read_by_tags, Tags, Match, BatchSize}).
+    translate_events(call(StoreId, {read_by_tags, Tags, Match, BatchSize})).
 
 %%====================================================================
 %% Metadata
@@ -137,13 +138,41 @@ delete_snapshot(StoreId, StreamId) ->
 %%====================================================================
 
 subscribe(StoreId, StreamId, Pid, Opts) ->
-    call(StoreId, {subscribe, StreamId, Pid, Opts}).
+    Bridge = bridge_for(Pid),
+    call(StoreId, {subscribe, StreamId, Bridge, Opts}).
 
 subscribe_all(StoreId, Pid, Opts) ->
-    call(StoreId, {subscribe_all, Pid, Opts}).
+    Bridge = bridge_for(Pid),
+    call(StoreId, {subscribe_all, Bridge, Opts}).
 
 unsubscribe(StoreId, SubKey) ->
     call(StoreId, {unsubscribe, SubKey}).
+
+%%====================================================================
+%% Internal — subscription bridge
+%%====================================================================
+%%
+%% Subscribers ask for {events, [#evoq_event{}]}; the store sends
+%% {events, [#event{}]}. Interpose a bridge process per subscription
+%% that translates between the two — same pattern as reckon-evoq.
+%%
+%% subscription_error messages (e.g. integrity violations during
+%% catch-up) pass through unchanged.
+
+bridge_for(Pid) when is_pid(Pid) ->
+    spawn(fun() -> bridge_loop(Pid, erlang:monitor(process, Pid)) end).
+
+bridge_loop(Subscriber, MonRef) ->
+    receive
+        {events, Events} when is_list(Events) ->
+            Subscriber ! {events, events_to_evoq(Events)},
+            bridge_loop(Subscriber, MonRef);
+        {subscription_error, _} = Msg ->
+            Subscriber ! Msg,
+            bridge_loop(Subscriber, MonRef);
+        {'DOWN', MonRef, process, Subscriber, _Reason} ->
+            ok
+    end.
 
 %%====================================================================
 %% Internal — store lookup + call
@@ -160,3 +189,50 @@ dispatch_call({ok, Pid}, StoreId, Request) ->
         exit:{noproc, _}  -> {error, {store_not_running, StoreId}};
         exit:{timeout, _} -> {error, {timeout, StoreId}}
     end.
+
+%%====================================================================
+%% Internal — event translation at the adapter boundary
+%%====================================================================
+%%
+%% Storage (mem_evoq_store) holds reckon_gater #event{} records. The
+%% evoq_event_store contract returns #evoq_event{} (or maps). Translate
+%% on the way out — same pattern as reckon_evoq_adapter:event_to_evoq/1.
+%%
+%% `mac' and `signature' are intentionally NOT propagated. They are
+%% storage-layer concerns; consumers downstream of evoq don't need
+%% them and propagating would leak them into projections and process
+%% managers that have no reason to see them.
+
+translate_events({ok, Events}) when is_list(Events) -> {ok, events_to_evoq(Events)};
+translate_events(Other)                              -> Other.
+
+events_to_evoq(Events) -> [event_to_evoq(E) || E <- Events].
+
+event_to_evoq(#event{
+    event_id              = EventId,
+    event_type            = EventType,
+    stream_id             = StreamId,
+    version               = Version,
+    data                  = Data,
+    metadata              = Metadata,
+    tags                  = Tags,
+    timestamp             = Timestamp,
+    epoch_us              = EpochUs,
+    data_content_type     = DataContentType,
+    metadata_content_type = MetadataContentType,
+    prev_event_hash       = PrevEventHash
+}) ->
+    #evoq_event{
+        event_id              = EventId,
+        event_type            = EventType,
+        stream_id             = StreamId,
+        version               = Version,
+        data                  = Data,
+        metadata              = Metadata,
+        tags                  = Tags,
+        timestamp             = Timestamp,
+        epoch_us              = EpochUs,
+        data_content_type     = DataContentType,
+        metadata_content_type = MetadataContentType,
+        prev_event_hash       = PrevEventHash
+    }.
