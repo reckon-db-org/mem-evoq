@@ -134,7 +134,36 @@ handle_call({unsubscribe, SubKey}, _From, State) ->
     {reply, ok, do_unsubscribe(SubKey, State)};
 
 %%--------------------------------------------------------------------
-%% Snapshots (further moves — pending)
+%% Snapshots
+%%--------------------------------------------------------------------
+
+handle_call({save_snapshot, StreamId, #snapshot{} = Snap}, _From, State) ->
+    {reply, ok, do_save_snapshot(StreamId, Snap, State)};
+
+handle_call({save_snapshot, StreamId, Version, Data, Metadata}, _From, State) ->
+    Snap = #snapshot{
+        stream_id = StreamId,
+        version = Version,
+        data = Data,
+        metadata = Metadata,
+        timestamp = erlang:system_time(millisecond)
+    },
+    {reply, ok, do_save_snapshot(StreamId, Snap, State)};
+
+handle_call({load_snapshot, StreamId}, _From, State) ->
+    {reply, do_load_latest_snapshot(StreamId, State), State};
+
+handle_call({load_snapshot, StreamId, Version}, _From, State) ->
+    {reply, do_load_snapshot_at(StreamId, Version, State), State};
+
+handle_call({list_snapshots, StreamId}, _From, State) ->
+    {reply, {ok, do_list_snapshots(StreamId, State)}, State};
+
+handle_call({delete_snapshot, StreamId}, _From, State) ->
+    {reply, ok, do_delete_snapshots_for_stream(StreamId, State)};
+
+%%--------------------------------------------------------------------
+%% Other (further moves — pending)
 %%--------------------------------------------------------------------
 
 handle_call(_Req, _From, State) ->
@@ -524,6 +553,57 @@ tags_match(EventTags, Wanted, all) ->
 generate_sub_key() ->
     Bin = crypto:strong_rand_bytes(8),
     list_to_binary([hex_digit(B) || <<B:4>> <= Bin]).
+
+%%====================================================================
+%% Internal — snapshots
+%%====================================================================
+
+%% @private Save a snapshot record under StreamId/Version. Replaces
+%% any existing snapshot at the same version.
+do_save_snapshot(StreamId, #snapshot{version = V} = Snap,
+                 #state{snapshots = All} = State) ->
+    PerStream = maps:get(StreamId, All, #{}),
+    NewPerStream = maps:put(V, Snap, PerStream),
+    State#state{snapshots = maps:put(StreamId, NewPerStream, All)}.
+
+%% @private Load the highest-version snapshot for a stream, or
+%% `{error, not_found}'.
+do_load_latest_snapshot(StreamId, #state{snapshots = All}) ->
+    case maps:get(StreamId, All, undefined) of
+        undefined ->
+            {error, not_found};
+        PerStream when map_size(PerStream) =:= 0 ->
+            {error, not_found};
+        PerStream ->
+            Latest = lists:max(maps:keys(PerStream)),
+            {ok, maps:get(Latest, PerStream)}
+    end.
+
+%% @private Load a specific version snapshot.
+do_load_snapshot_at(StreamId, Version, #state{snapshots = All}) ->
+    case maps:get(StreamId, All, undefined) of
+        undefined ->
+            {error, not_found};
+        PerStream ->
+            case maps:get(Version, PerStream, undefined) of
+                undefined -> {error, not_found};
+                Snap -> {ok, Snap}
+            end
+    end.
+
+%% @private List all snapshots for a stream, oldest version first.
+do_list_snapshots(StreamId, #state{snapshots = All}) ->
+    case maps:get(StreamId, All, undefined) of
+        undefined ->
+            [];
+        PerStream ->
+            Versions = lists:sort(maps:keys(PerStream)),
+            [maps:get(V, PerStream) || V <- Versions]
+    end.
+
+%% @private Delete all snapshots for a stream. Idempotent.
+do_delete_snapshots_for_stream(StreamId, #state{snapshots = All} = State) ->
+    State#state{snapshots = maps:remove(StreamId, All)}.
 
 %%====================================================================
 %% Internal — integrity init
