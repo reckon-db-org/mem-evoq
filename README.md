@@ -29,14 +29,28 @@ Pairs with evoq for:
 ## Quick start
 
 ```erlang
-{ok, _} = application:ensure_all_started(mem_evoq).
-ok = application:set_env(evoq, event_store_adapter, mem_evoq_adapter).
+{ok, _} = application:ensure_all_started(mem_evoq),
+ok = application:set_env(evoq, event_store_adapter, mem_evoq_adapter),
 
-{ok, _} = mem_evoq:start_store(my_test_store).
+{ok, _} = mem_evoq:start_store(my_test_store),
 
 %% Any evoq dispatch now targets the in-memory store.
 %% When done:
 ok = mem_evoq:stop_store(my_test_store).
+```
+
+Or talk to the adapter directly without evoq in the loop:
+
+```erlang
+{ok, _} = mem_evoq:start_store(direct_demo),
+
+{ok, 1} = mem_evoq_adapter:append(
+    direct_demo, <<"order$1">>, -1,  %% -1 = ?NO_STREAM
+    [#{event_type => <<"order_placed">>, data => #{total => 42}},
+     #{event_type => <<"order_confirmed">>, data => #{}}]),
+
+{ok, [_, _]} = mem_evoq_adapter:read(
+    direct_demo, <<"order$1">>, 0, 10, forward).
 ```
 
 ## With integrity enabled
@@ -45,17 +59,36 @@ mem-evoq mirrors reckon-db's tamper-resistance behaviour so you can test integri
 
 ```erlang
 Key = crypto:strong_rand_bytes(32),
-{ok, _} = mem_evoq:start_store(my_test_store, #{
+{ok, _} = mem_evoq:start_store(secure_demo, #{
     integrity => #{enabled => true, key => Key}
-}).
+}),
+
+{ok, 0} = mem_evoq_adapter:append(
+    secure_demo, <<"audit$1">>, -1,
+    [#{event_type => <<"login_attempted">>, data => #{user => <<"a">>}}]),
+
+%% Strict read verifies the full chain.
+{ok, [_]} = mem_evoq_adapter:read(
+    secure_demo, <<"audit$1">>, 0, 10, forward, #{verify => strict}).
 ```
 
-Events written under this store carry `prev_event_hash` and `mac`. Reads verify both. A tampered event (mutated directly in store state via a test helper) surfaces as `{error, {integrity_violation, _}}` on read — same shape as reckon-db.
+Events written under this store carry `prev_event_hash` and `mac`. Reads verify both. A tampered event surfaces as `{error, {integrity_violation, _}}`. See [Integrity guide](guides/integrity.md) for verification modes, snapshot anchoring, and subscription catch-up behaviour.
 
-## What this is NOT
+## Limitations
 
-- **Not production**. No persistence, no clustering, no replication. For production use, pair evoq with `reckon-evoq` + `reckon-db`.
-- **Not a full reckon-db substitute**. Filter modes, scavenging, archive operations, and cluster-aware queries are out of scope. See `guides/integrity.md` for the full limitations table.
+| Concern | mem-evoq | reckon-db |
+|---|---|---|
+| Persistence | ✘ — process restart loses state | ✓ disk-backed (Khepri/Ra) |
+| Clustering / replication | ✘ single process | ✓ Raft consensus |
+| Tamper-resistance | ✓ identical primitives, opt-in per store | ✓ identical primitives, opt-in per store |
+| Subscription fan-out | ✓ live + catch-up | ✓ live + catch-up |
+| Snapshots | ✓ save/load/list/delete + anchor | ✓ |
+| Read filters | by stream / event_type / pattern / tags | full reckon-db filter taxonomy |
+| Scavenging / archive | ✘ | ✓ |
+| Capability tokens / per-region keys / vault | ✘ | ✓ |
+| Key rotation | ✘ — restart with the new key | ✓ |
+
+For anything in the right column not matched on the left, pair evoq with `reckon-evoq` + `reckon-db`.
 
 ## Related packages
 
