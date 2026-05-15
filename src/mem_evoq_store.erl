@@ -106,6 +106,11 @@ handle_call({delete, StreamId}, _From, State) ->
     {reply, ok, do_delete_stream(StreamId, State)};
 
 %%--------------------------------------------------------------------
+%% Append with subscriber fan-out — handled inside the {append, ...}
+%% clause above; live delivery happens in do_append/4.
+%%--------------------------------------------------------------------
+
+%%--------------------------------------------------------------------
 %% Cross-stream reads
 %%--------------------------------------------------------------------
 
@@ -113,7 +118,23 @@ handle_call({read_all_global, Offset, BatchSize}, _From, State) ->
     {reply, do_read_all_global(Offset, BatchSize, State), State};
 
 %%--------------------------------------------------------------------
-%% Snapshots + subscriptions (further moves — pending)
+%% Subscriptions
+%%--------------------------------------------------------------------
+
+handle_call({subscribe, StreamId, Pid, Opts}, _From, State) ->
+    do_subscribe({by_stream, StreamId}, Pid, Opts, State);
+
+handle_call({subscribe_all, Pid, Opts}, _From, State) ->
+    do_subscribe(all, Pid, Opts, State);
+
+handle_call({subscribe, Type, Selector, Pid, Opts}, _From, State) ->
+    do_subscribe({Type, Selector}, Pid, Opts, State);
+
+handle_call({unsubscribe, SubKey}, _From, State) ->
+    {reply, ok, do_unsubscribe(SubKey, State)};
+
+%%--------------------------------------------------------------------
+%% Snapshots (further moves — pending)
 %%--------------------------------------------------------------------
 
 handle_call(_Req, _From, State) ->
@@ -122,6 +143,13 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+%% Subscriber pid died — clean up any subscriptions it owned.
+handle_info({'DOWN', _Ref, process, Pid, _Reason},
+            #state{subscribers = Subs} = State) ->
+    Kept = maps:filter(
+        fun(_K, #{pid := P}) -> P =/= Pid end,
+        Subs),
+    {noreply, State#state{subscribers = Kept}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -193,7 +221,11 @@ append_events_to_stream(StreamId, CurrentVersion, Events, State) ->
     %% Acc is reverse-order; reverse and prepend in correct order.
     AppendList = lists:reverse(Recorded),
     NewStreams = maps_update_append(StreamId, AppendList, State#state.streams),
-    {ok, FinalVersion, State#state{streams = NewStreams}}.
+    NewState = State#state{streams = NewStreams},
+    %% Fan out to live subscribers (move 10) — synchronous send per
+    %% subscriber. Filter matching applied per event.
+    ok = fanout_to_subscribers(AppendList, NewState),
+    {ok, FinalVersion, NewState}.
 
 %% Mirror of reckon_db_streams:create_event_record/5. Integrity fields
 %% (prev_event_hash, mac, signature) are left as undefined here —
@@ -358,6 +390,140 @@ do_read_all_global(Offset, BatchSize, #state{streams = Streams})
     {ok, Sliced};
 do_read_all_global(_Offset, _BatchSize, _State) ->
     {error, badarg}.
+
+%%====================================================================
+%% Internal — subscriptions
+%%====================================================================
+
+-type filter() ::
+    all |
+    {by_stream, binary()} |
+    {by_event_type, binary()} |
+    {by_event_pattern, map()} |
+    {by_tags, [binary()], any | all}.
+
+%% @private Register a subscription.
+%%
+%% Opts:
+%% <ul>
+%%   <li>`from => 0' — replay all matching existing events synchronously
+%%       to the subscriber pid before the call returns (catch-up).</li>
+%%   <li>`from => latest' (default) — no catch-up; subscriber receives
+%%       only events written after the call returns (live).</li>
+%% </ul>
+%%
+%% Returns `{ok, SubKey}' where SubKey is an opaque binary the caller
+%% later passes to `unsubscribe/2'.
+do_subscribe(FilterIn, Pid, Opts, State) when is_pid(Pid), is_map(Opts) ->
+    SubKey = generate_sub_key(),
+    From = maps:get(from, Opts, latest),
+    Filter = normalise_filter(FilterIn),
+    %% Catch-up replay BEFORE installing the subscription so live
+    %% deliveries that arrive after the call returns don't race with
+    %% catch-up batches.
+    case From of
+        latest -> ok;
+        N when is_integer(N), N >= 0 -> deliver_catchup(Pid, Filter, N, State);
+        _ -> ok
+    end,
+    SubInfo = #{
+        sub_key => SubKey,
+        pid     => Pid,
+        filter  => Filter,
+        from    => From
+    },
+    %% Monitor the subscriber so we can self-clean on its death.
+    _Ref = erlang:monitor(process, Pid),
+    NewSubs = maps:put(SubKey, SubInfo, State#state.subscribers),
+    {reply, {ok, SubKey}, State#state{subscribers = NewSubs}}.
+
+%% @private Remove a subscription. Idempotent.
+do_unsubscribe(SubKey, #state{subscribers = Subs} = State) ->
+    State#state{subscribers = maps:remove(SubKey, Subs)}.
+
+%% @private Subscribe-time normalisation of the user-facing filter
+%% shapes (stream / event_type / event_pattern / tags — both the
+%% bare-atom and the `by_*` flavours) to the internal canonical form.
+normalise_filter(all) -> all;
+normalise_filter({stream, StreamId}) -> {by_stream, StreamId};
+normalise_filter({by_stream, StreamId}) -> {by_stream, StreamId};
+normalise_filter({event_type, Type}) -> {by_event_type, Type};
+normalise_filter({by_event_type, Type}) -> {by_event_type, Type};
+normalise_filter({event_pattern, P}) -> {by_event_pattern, P};
+normalise_filter({by_event_pattern, P}) -> {by_event_pattern, P};
+normalise_filter({tags, Tags}) -> {by_tags, Tags, any};
+normalise_filter({by_tags, Tags}) -> {by_tags, Tags, any};
+normalise_filter({by_tags, Tags, Match}) -> {by_tags, Tags, Match}.
+
+%% @private Send a catch-up batch synchronously.
+%%
+%% The current implementation delivers ALL matching events (sorted by
+%% epoch_us, offset-bounded). Future tightening could split into
+%% configurable batch sizes; mem-evoq is for tests so a single batch
+%% is fine.
+deliver_catchup(Pid, Filter, FromOffset, #state{streams = Streams}) ->
+    AllEvents = lists:append(maps:values(Streams)),
+    Matched = [E || E <- AllEvents, event_matches_filter(E, Filter)],
+    Sorted = lists:sort(
+        fun(#event{epoch_us = A}, #event{epoch_us = B}) -> A =< B end,
+        Matched),
+    Sliced = case Sorted of
+        _ when FromOffset =:= 0 -> Sorted;
+        _ -> lists:nthtail(min(FromOffset, length(Sorted)), Sorted)
+    end,
+    case Sliced of
+        [] -> ok;
+        _ -> Pid ! {events, Sliced}, ok
+    end.
+
+%% @private Live fan-out — for each subscriber whose filter matches
+%% one or more of the newly-appended events, send a batch of just
+%% those matching events.
+fanout_to_subscribers(NewEvents, #state{subscribers = Subs}) ->
+    maps:fold(
+        fun(_K, #{pid := Pid, filter := Filter}, _Acc) ->
+            Matched = [E || E <- NewEvents, event_matches_filter(E, Filter)],
+            case Matched of
+                [] -> ok;
+                _ -> Pid ! {events, Matched}, ok
+            end
+        end,
+        ok,
+        Subs).
+
+%% @private Single-event filter match. Move 11 — the filter taxonomy
+%% covered here is a subset of reckon-db's (which adds payload-pattern
+%% and by_event_pattern variants). For mem-evoq we cover the common
+%% test cases and document the rest.
+-spec event_matches_filter(event(), filter()) -> boolean().
+event_matches_filter(_Event, all) ->
+    true;
+event_matches_filter(#event{stream_id = SID}, {by_stream, SID}) ->
+    true;
+event_matches_filter(#event{}, {by_stream, _}) ->
+    false;
+event_matches_filter(#event{event_type = T}, {by_event_type, T}) ->
+    true;
+event_matches_filter(#event{}, {by_event_type, _}) ->
+    false;
+event_matches_filter(#event{event_type = T}, {by_event_pattern, #{event_type := T}}) ->
+    true;
+event_matches_filter(#event{}, {by_event_pattern, _}) ->
+    false;
+event_matches_filter(#event{tags = Tags}, {by_tags, Wanted, Match})
+        when is_list(Tags) ->
+    tags_match(Tags, Wanted, Match);
+event_matches_filter(#event{tags = undefined}, {by_tags, _, _}) ->
+    false.
+
+tags_match(EventTags, Wanted, any) ->
+    lists:any(fun(T) -> lists:member(T, EventTags) end, Wanted);
+tags_match(EventTags, Wanted, all) ->
+    lists:all(fun(T) -> lists:member(T, EventTags) end, Wanted).
+
+generate_sub_key() ->
+    Bin = crypto:strong_rand_bytes(8),
+    list_to_binary([hex_digit(B) || <<B:4>> <= Bin]).
 
 %%====================================================================
 %% Internal — integrity init
