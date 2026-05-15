@@ -80,7 +80,14 @@ handle_call({append, StreamId, ExpectedVersion, Events}, _From, State) ->
     end;
 
 %%--------------------------------------------------------------------
-%% Read path (next moves — pending)
+%% Read path
+%%--------------------------------------------------------------------
+
+handle_call({read, StreamId, FromVersion, Count, Direction}, _From, State) ->
+    {reply, do_read(StreamId, FromVersion, Count, Direction, State), State};
+
+%%--------------------------------------------------------------------
+%% Read path (further moves — pending)
 %%--------------------------------------------------------------------
 
 handle_call(_Req, _From, State) ->
@@ -211,6 +218,51 @@ generate_event_id() ->
 
 hex_digit(D) when D < 10 -> $0 + D;
 hex_digit(D)             -> $a + D - 10.
+
+%%====================================================================
+%% Internal — read
+%%====================================================================
+
+%% @private Read a slice of a stream.
+%%
+%% Forward semantics: take events at versions
+%% `[FromVersion, FromVersion + Count - 1]'.
+%% Backward semantics: take events at versions
+%% `[max(0, FromVersion - Count + 1), FromVersion]', returned in
+%% descending version order (newest first).
+%%
+%% Stream-not-found returns `{error, {stream_not_found, StreamId}}'.
+%% Out-of-range requests return a partial result (no padding, no error).
+-spec do_read(
+    binary(), non_neg_integer(), pos_integer(), forward | backward, #state{}
+) -> {ok, [event()]} | {error, term()}.
+do_read(StreamId, FromVersion, Count, Direction, #state{streams = Streams})
+        when is_integer(FromVersion), FromVersion >= 0,
+             is_integer(Count), Count > 0,
+             (Direction =:= forward orelse Direction =:= backward) ->
+    case maps:get(StreamId, Streams, undefined) of
+        undefined ->
+            {error, {stream_not_found, StreamId}};
+        Events when is_list(Events) ->
+            {ok, slice_events(Events, FromVersion, Count, Direction)}
+    end;
+do_read(_StreamId, _FromVersion, _Count, _Direction, _State) ->
+    {error, badarg}.
+
+%% List is in forward order (oldest first); filter into the requested
+%% window, then reverse for backward reads so callers get the natural
+%% "newest first" sequence.
+slice_events(Events, FromVersion, Count, forward) ->
+    EndVersion = FromVersion + Count - 1,
+    [E || E <- Events,
+          E#event.version >= FromVersion,
+          E#event.version =< EndVersion];
+slice_events(Events, FromVersion, Count, backward) ->
+    StartVersion = max(0, FromVersion - Count + 1),
+    Filtered = [E || E <- Events,
+                     E#event.version >= StartVersion,
+                     E#event.version =< FromVersion],
+    lists:reverse(Filtered).
 
 %%====================================================================
 %% Internal — integrity init
