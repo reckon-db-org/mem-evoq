@@ -24,6 +24,7 @@
 
     %% Read path
     read/5,
+    read/6,
     read_all/3,
     read_all/4,
     read_all_global/3,
@@ -66,6 +67,9 @@ append(StoreId, StreamId, ExpectedVersion, Events) ->
 read(StoreId, StreamId, FromVersion, Count, Direction) ->
     call(StoreId, {read, StreamId, FromVersion, Count, Direction}).
 
+read(StoreId, StreamId, FromVersion, Count, Direction, Opts) ->
+    call(StoreId, {read, StreamId, FromVersion, Count, Direction, Opts}).
+
 read_all(StoreId, StreamId, Direction) ->
     call(StoreId, {read_all, StreamId, Direction, 1000}).
 
@@ -92,16 +96,13 @@ version(StoreId, StreamId) ->
     call(StoreId, {version, StreamId}).
 
 exists(StoreId, StreamId) ->
-    case call(StoreId, {exists, StreamId}) of
-        true -> true;
-        _    -> false
-    end.
+    boolean_or_false(call(StoreId, {exists, StreamId})).
 
 has_events(StoreId) ->
-    case call(StoreId, has_events) of
-        true -> true;
-        _    -> false
-    end.
+    boolean_or_false(call(StoreId, has_events)).
+
+boolean_or_false(true) -> true;
+boolean_or_false(_)    -> false.
 
 list_streams(StoreId) ->
     call(StoreId, list_streams).
@@ -149,14 +150,13 @@ unsubscribe(StoreId, SubKey) ->
 %%====================================================================
 
 call(StoreId, Request) ->
-    case mem_evoq_registry:lookup(StoreId) of
-        {ok, Pid} ->
-            try
-                gen_server:call(Pid, Request, 5000)
-            catch
-                exit:{noproc, _} -> {error, {store_not_running, StoreId}};
-                exit:{timeout, _} -> {error, {timeout, StoreId}}
-            end;
-        {error, not_found} ->
-            {error, {store_not_started, StoreId}}
+    dispatch_call(mem_evoq_registry:lookup(StoreId), StoreId, Request).
+
+dispatch_call({error, not_found}, StoreId, _Request) ->
+    {error, {store_not_started, StoreId}};
+dispatch_call({ok, Pid}, StoreId, Request) ->
+    try gen_server:call(Pid, Request, 5000)
+    catch
+        exit:{noproc, _}  -> {error, {store_not_running, StoreId}};
+        exit:{timeout, _} -> {error, {timeout, StoreId}}
     end.
