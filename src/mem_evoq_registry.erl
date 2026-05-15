@@ -1,7 +1,7 @@
 %% @doc ETS-backed registry mapping store IDs to their per-store
 %% gen_server pids.
 %%
-%% Owns a single named ETS table (`mem_evoq_registry`) so lookups
+%% Owns a single named ETS table (`mem_evoq_registry') so lookups
 %% are sub-microsecond from the adapter callbacks. Lives as a
 %% gen_server so the table survives supervisor restarts only if the
 %% registry itself does NOT restart (which is the right semantic —
