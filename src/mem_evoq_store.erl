@@ -87,7 +87,26 @@ handle_call({read, StreamId, FromVersion, Count, Direction}, _From, State) ->
     {reply, do_read(StreamId, FromVersion, Count, Direction, State), State};
 
 %%--------------------------------------------------------------------
-%% Read path (further moves — pending)
+%% Stream metadata
+%%--------------------------------------------------------------------
+
+handle_call({version, StreamId}, _From, State) ->
+    {reply, current_version(StreamId, State), State};
+
+handle_call({exists, StreamId}, _From, State) ->
+    {reply, has_stream(StreamId, State), State};
+
+handle_call(has_events, _From, State) ->
+    {reply, do_has_events(State), State};
+
+handle_call(list_streams, _From, State) ->
+    {reply, {ok, do_list_streams(State)}, State};
+
+handle_call({delete, StreamId}, _From, State) ->
+    {reply, ok, do_delete_stream(StreamId, State)};
+
+%%--------------------------------------------------------------------
+%% Snapshots + subscriptions (further moves — pending)
 %%--------------------------------------------------------------------
 
 handle_call(_Req, _From, State) ->
@@ -199,6 +218,12 @@ create_event_record(Event, StreamId, Version, Timestamp, EpochUs) ->
 
 %% Append-to-list in a map; create the entry if absent. Order matters:
 %% List MUST be in version order (oldest first).
+%%
+%% Empty appends are a no-op — never create an empty stream entry.
+%% This matches reckon-db, which doesn't put anything in Khepri if
+%% no events are provided.
+maps_update_append(_Key, [], Map) ->
+    Map;
 maps_update_append(Key, ListToAppend, Map) ->
     case maps:get(Key, Map, undefined) of
         undefined ->
@@ -263,6 +288,42 @@ slice_events(Events, FromVersion, Count, backward) ->
                      E#event.version >= StartVersion,
                      E#event.version =< FromVersion],
     lists:reverse(Filtered).
+
+%%====================================================================
+%% Internal — metadata
+%%====================================================================
+
+%% @private Stream exists when it has at least one event in state.
+%% Empty entries are not produced (see maps_update_append/3).
+-spec has_stream(binary(), #state{}) -> boolean().
+has_stream(StreamId, #state{streams = Streams}) ->
+    maps:is_key(StreamId, Streams).
+
+%% @private Whether the store contains at least one event across any
+%% stream. Mirrors reckon_db_streams:has_events/1.
+-spec do_has_events(#state{}) -> boolean().
+do_has_events(#state{streams = Streams}) ->
+    %% Empty-stream entries don't exist by construction, so any
+    %% non-empty map means events exist.
+    maps:size(Streams) > 0.
+
+%% @private All stream IDs in the store. Order is implementation-
+%% defined; mirrors reckon_db_streams:list_streams/1 which returns a
+%% lists:usort'd list.
+-spec do_list_streams(#state{}) -> [binary()].
+do_list_streams(#state{streams = Streams}) ->
+    lists:usort(maps:keys(Streams)).
+
+%% @private Delete a stream from the store. Idempotent — returns
+%% an unchanged state if the stream doesn't exist. Snapshots for
+%% the stream are also dropped (matches the operational expectation
+%% that "delete the stream" means "remove all trace of it").
+-spec do_delete_stream(binary(), #state{}) -> #state{}.
+do_delete_stream(StreamId, #state{streams = S, snapshots = SS} = State) ->
+    State#state{
+        streams   = maps:remove(StreamId, S),
+        snapshots = maps:remove(StreamId, SS)
+    }.
 
 %%====================================================================
 %% Internal — integrity init
