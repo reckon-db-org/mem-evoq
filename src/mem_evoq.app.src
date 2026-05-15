@@ -1,0 +1,19 @@
+{application, mem_evoq, [
+    {description, "In-memory event-store adapter for evoq"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {mem_evoq_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        evoq,
+        reckon_gater
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"Codeberg", "https://codeberg.org/reckon-db-org/mem-evoq"}
+    ]}
+]}.
