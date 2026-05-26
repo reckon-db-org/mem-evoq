@@ -2,6 +2,7 @@
 
 [![Hex.pm](https://img.shields.io/hexpm/v/mem_evoq.svg)](https://hex.pm/packages/mem_evoq)
 [![Hexdocs.pm](https://img.shields.io/badge/docs-hexdocs-blue.svg)](https://hexdocs.pm/mem_evoq)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow.svg)](https://buymeacoffee.com/rlefever)
 
 In-memory event-store adapter for [evoq](https://codeberg.org/reckon-db-org/evoq).
 
