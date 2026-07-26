@@ -3,7 +3,7 @@
 **Status:** Scaffold landed; callback implementation pending.
 **Target release:** 0.1.0 to hex.pm.
 **Companion:** Move 4 in the evoq pressure-on-status-quo plan
-(in `/home/rl/work/codeberg.org/reckon-db-org/reckon-ecosystem/`
+(in `/home/rl/work/github.com/reckon-db-org/reckon-ecosystem/`
 once written, currently in conversation).
 
 ---
