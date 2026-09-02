@@ -4,11 +4,11 @@
 [![Hexdocs.pm](https://img.shields.io/badge/docs-hexdocs-blue.svg)](https://hexdocs.pm/mem_evoq)
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow.svg)](https://buymeacoffee.com/rlefever)
 
-In-memory event-store adapter for [evoq](https://codeberg.org/reckon-db-org/evoq).
+In-memory event-store adapter for [evoq](https://github.com/reckon-db-org/evoq).
 
 ## Why this exists
 
-[evoq](https://codeberg.org/reckon-db-org/evoq) is backend-agnostic. The production adapter is [reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq), which targets [reckon-db](https://codeberg.org/reckon-db-org/reckon-db). For tests, demos, and as a reference implementation of the `evoq_event_store` adapter behaviour, this package provides an in-memory adapter that has no disk persistence and no clustering — process restart loses state, which is the intended semantic.
+[evoq](https://github.com/reckon-db-org/evoq) is backend-agnostic. The production adapter is [reckon-evoq](https://github.com/reckon-db-org/reckon-evoq), which targets [reckon-db](https://github.com/reckon-db-org/reckon-db). For tests, demos, and as a reference implementation of the `evoq_event_store` adapter behaviour, this package provides an in-memory adapter that has no disk persistence and no clustering — process restart loses state, which is the intended semantic.
 
 Pairs with evoq for:
 
@@ -93,10 +93,10 @@ For anything in the right column not matched on the left, pair evoq with `reckon
 
 ## Related packages
 
-- [evoq](https://codeberg.org/reckon-db-org/evoq) — the CQRS / Event Sourcing framework this is an adapter for
-- [reckon-evoq](https://codeberg.org/reckon-db-org/reckon-evoq) — production adapter targeting reckon-db
-- [reckon-gater](https://codeberg.org/reckon-db-org/reckon-gater) — shared types and integrity primitives both adapters consume
-- [reckon-db](https://codeberg.org/reckon-db-org/reckon-db) — the production event store
+- [evoq](https://github.com/reckon-db-org/evoq) — the CQRS / Event Sourcing framework this is an adapter for
+- [reckon-evoq](https://github.com/reckon-db-org/reckon-evoq) — production adapter targeting reckon-db
+- [reckon-gater](https://github.com/reckon-db-org/reckon-gater) — shared types and integrity primitives both adapters consume
+- [reckon-db](https://github.com/reckon-db-org/reckon-db) — the production event store
 
 ## License
 

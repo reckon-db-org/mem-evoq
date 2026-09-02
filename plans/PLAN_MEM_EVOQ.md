@@ -108,7 +108,7 @@ Each move is one commit chain. Done-criterion is what proves it.
 22. **`rebar3 hex publish` 0.1.0.** *Done = `mem_evoq-0.1.0.tar` on
     hex.pm.*
 
-23. **Tag + push v0.1.0 to Codeberg.**
+23. **Tag + push v0.1.0 to GitHub.**
 
 ### Downstream payoff
 
