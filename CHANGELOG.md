@@ -5,6 +5,24 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-10-20
+
+### Fixed
+
+- The package can be published at all. `rebar3_hex` was unpinned, so the tag's
+  job resolved 7.3.0, which resolves credentials through hex_core 0.19's
+  `hex_cli_auth` and needs a `cli_auth_callbacks` map that only rebar3 3.27.1
+  and later supply. On the 3.27.0 the workflows pin, that lookup is a bare
+  badmatch, so `HEX_API_KEY` is never read and `v0.1.4` died at the publish
+  step with "Uncaught error in rebar_core". The four release-path plugins are
+  now pinned to the versions reckon-db and evoq publish with.
+
+### Notes
+
+- `v0.1.4` was tagged on 2026-10-20 and never published: a tag runs the
+  workflow and reads `rebar.config` from its own tree, so the pin could not
+  reach it. hex.pm has no 0.1.4.
+
 ## [0.1.4] - 2026-10-20
 
 ### Changed
