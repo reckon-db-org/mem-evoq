@@ -5,6 +5,15 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-10-20
+
+### Changed
+
+- `reckon_gater` floor `~> 2.1` -> `~> 3.11`. Rule 2 of the dependency check
+  (macula-codebase-checks#4) reads a floor two majors behind as the thing a new
+  consumer would copy, so it is the floor that moves. No source change and no
+  API change: the tree compiles and its whole gate passes against 3.11.
+
 ## [0.1.2] - 2026-05-15
 
 ### Fixed
