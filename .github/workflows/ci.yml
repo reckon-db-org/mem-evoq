@@ -30,6 +30,9 @@ on:
   pull_request:
     paths-ignore: ['**.md', 'proposals/**']
   workflow_dispatch:
+  # publish-hex.yml runs this on the tagged commit and publishes only when it
+  # is green, so a release tag is tested before it reaches hex.
+  workflow_call:
 
 permissions:
   contents: read

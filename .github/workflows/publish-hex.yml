@@ -1,0 +1,193 @@
+# Publishes exactly a pushed release tag to hex.pm.
+#
+# Copied from reckon-db-org/reckon-evoq's workflow of the same name (the version
+# on its main), itself a port of reckon-db-org/evoq's, itself a port of
+# macula-services/mcl-om's, which has published a real release through this
+# shape. Job steps copied rather than redesigned: the four jobs, their order and
+# their `needs` are reckon-evoq's, and the only differences in the body are that
+# the `test` job calls this repository's own ci.yml and the names below. Only
+# this header is mem-evoq's own.
+#
+# - A pushed tag vX.Y.Z runs `verify', `test' and `release-guard', and then
+#   `publish'. THE TAG PUBLISHES, once the tagged commit is tested and guarded.
+# - A manual dispatch is a dry run: it runs `verify' and never publishes.
+#
+# TAG-TO-RELEASE IS THE DESIGN, NOT A MISSING GATE. Raf, 2026-09-22: "I WANT
+# tag-to-release". The `hex-publish' environment here carries only a `v*.*.*'
+# tag policy and NO required reviewer, measured through
+# `gh api repos/.../environments/hex-publish', and that is deliberate: the
+# approval point is the PUSH OF THE TAG, which already goes to Raf under the
+# push gate. A second human gate after it would duplicate that one.
+#
+# DO NOT ADD A REQUIRED REVIEWER HERE, and do not write a comment claiming one
+# exists. A comment describing a safeguard that is not there is worse than no
+# comment: it is the failure this project has hit before, where the text said a
+# check ran and nothing did. HEX_API_KEY is present as an environment secret.
+#
+# THE VERSION AND THE TAG MUST AGREE. `scripts/is_checkout_publishable.sh'
+# derives the tag from `{vsn, ...}' in src/mem_evoq.app.src, so a tag naming a different
+# version is refused rather than published. It also refuses a dirty tree, a HEAD
+# that is not the tag, a tag the remote does not have, and a CHANGELOG with no
+# section for the version.
+#
+# THE RELEASE GUARD IS KEPT, and it is the one that matters most here: it
+# refuses a tag whose commit is not an ancestor of the default branch, so a tag
+# cut on a branch nobody merged publishes nothing. `test' runs this repository's
+# ci.yml on the tagged commit for the same reason: the tag publishes only once
+# the checks pass on it, not merely on the branch it came from.
+#
+# mem-evoq ships no NIF, so there is no "does the NIF load from this build" step,
+# unlike reckon-db.
+#
+# It moves when evoq, reckon_gater or its own adapter contract moves: it declares `{evoq, "~> 1.15"}` and `{reckon_gater, "~> 3.11"}`, so a major on either breaks that by construction and the pair has to be released together.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to dry-run, vX.Y.Z. Never publishes.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  OTP_VERSION: '28.4.3'
+  REBAR3_VERSION: '3.27.0'
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+concurrency:
+  group: publish-hex-${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Guard and build the package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The guard comes from this workflow's own commit, so a dry run can
+      # check a tag cut before the guard existed. On a tag push this commit
+      # is the tag itself.
+      - name: Check out the workflow's own commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: ci
+
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          path: pkg
+
+      - name: Set up Erlang/OTP and rebar3
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+          version-type: strict
+
+      - name: Refuse unless this is the clean, pushed release tag
+        run: bash ci/scripts/is_checkout_publishable.sh "$GITHUB_WORKSPACE/pkg"
+
+      - name: Build the package and docs
+        working-directory: pkg
+        run: rebar3 hex build
+
+      # The publish job's command as a dry run, with a placeholder key. It
+      # fails here, before the publish job starts, if the command does
+      # not read a key from HEX_API_KEY; it cannot tell whether the real key
+      # works. The dead API URL keeps the placeholder away from hex.pm.
+      - name: Dry-run the publish command
+        working-directory: pkg
+        env:
+          HEX_API_KEY: placeholder-not-a-real-key
+          HEX_API_URL: http://127.0.0.1:9
+        run: rebar3 hex publish --repo hexpm --yes --dry-run
+
+  # The whole of this repository's ci.yml, on the tagged commit (a called workflow checks
+  # out the caller's github.sha, which on a tag push is the tag). A dispatch
+  # is a dry run of `verify' and skips it: it would test the branch, not the tag.
+  test:
+    name: Test the release commit
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+
+
+  # The release guard (macula-ci-images#5): the tagged commit must be an
+  # ancestor of the default branch, and the tag's version must be the version
+  # this repository publishes. No `if:` on purpose: a skipped job skips the
+  # publish that needs it, and the guard exits 0 by itself for a ref that is not
+  # a release tag.
+  release-guard:
+    name: The release guard
+    uses: macula-io/macula-ci-images/.github/workflows/release-guard.yml@2660ee4ce1c51ce3d2bf14043ebc8a2784065cd9
+
+  publish:
+    name: Publish to hex.pm
+    needs: [verify, test, release-guard]
+    # Only a pushed release tag publishes, whatever the triggers above say.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: hex-publish
+    steps:
+      - name: Refuse unless this run is a pushed release tag
+        run: |
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/tags/v*) ;;
+            *) echo "::error::publish runs only for a pushed release tag, not $GITHUB_EVENT_NAME $GITHUB_REF"
+               exit 1 ;;
+          esac
+
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      # FIRST check that can run a script from the tag, before anything
+      # reaches hex. A blank or revoked HEX_API_KEY used to surface only inside
+      # `rebar3 hex publish' ("No write key found"). The secret is read at run
+      # time, so after fixing it a re-run of this job is enough. Never prints
+      # the value.
+      - name: Refuse unless hex.pm accepts HEX_API_KEY
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: bash scripts/is_hex_publish_key_live.sh
+
+      - name: Set up Erlang/OTP and rebar3
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          rebar3-version: ${{ env.REBAR3_VERSION }}
+          version-type: strict
+
+      - name: Refuse unless this is the clean, pushed release tag
+        run: bash scripts/is_checkout_publishable.sh
+
+      # rebar3_hex reads HEX_API_KEY only for a named repository: without
+      # --repo it takes the default hexpm config, finds no write key and
+      # stops with "No write key found for user".
+      - name: Publish the package and docs
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: rebar3 hex publish --repo hexpm --yes
+
+      - name: Check that hex serves the tagged code
+        run: |
+          VSN="${RELEASE_TAG#v}"
+          for attempt in 1 2 3 4 5; do
+            if bash scripts/is_hex_serving_what_git_says.sh "$VSN" "$RELEASE_TAG"; then
+              exit 0
+            fi
+            echo "Attempt $attempt: not confirmed yet, retrying in 30 seconds"
+            sleep 30
+          done
+          echo "::error::hex.pm does not serve the code tagged $RELEASE_TAG"
+          exit 1
