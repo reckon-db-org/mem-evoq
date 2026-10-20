@@ -569,12 +569,26 @@ do_read_all_global(_Offset, _BatchSize, _State) ->
 %% Internal — subscriptions
 %%====================================================================
 
+%% What a caller may pass to subscribe. The `{by_tags, Tags, Match}' shape was
+%% removed on 2026-10-20: nothing could reach it, because the adapter exposes
+%% only subscribe/4 (by stream) and subscribe_all/3, so a caller had no way in.
+%% Dialyzer found the dead clause in normalise_filter/1; the type now says what
+%% can actually arrive.
 -type filter() ::
     all |
     {by_stream, binary()} |
     {by_event_type, binary()} |
     {by_event_pattern, map()} |
-    {by_tags, [binary()], any | all}.
+    {by_tags, [binary()]}.
+
+%% The shape a filter takes once normalise_filter/1 has run. Tag filters are
+%% canonicalised to `any'; there is no other match mode to canonicalise to.
+-type normalised_filter() ::
+    all |
+    {by_stream, binary()} |
+    {by_event_type, binary()} |
+    {by_event_pattern, map()} |
+    {by_tags, [binary()], any}.
 
 %% @private Register a subscription.
 %%
@@ -615,6 +629,7 @@ do_unsubscribe(SubKey, #state{subscribers = Subs} = State) ->
 %% @private Subscribe-time normalisation of the user-facing filter
 %% shapes (stream / event_type / event_pattern / tags — both the
 %% bare-atom and the `by_*` flavours) to the internal canonical form.
+-spec normalise_filter(filter()) -> normalised_filter().
 normalise_filter(all) -> all;
 normalise_filter({stream, StreamId}) -> {by_stream, StreamId};
 normalise_filter({by_stream, StreamId}) -> {by_stream, StreamId};
@@ -623,8 +638,7 @@ normalise_filter({by_event_type, Type}) -> {by_event_type, Type};
 normalise_filter({event_pattern, P}) -> {by_event_pattern, P};
 normalise_filter({by_event_pattern, P}) -> {by_event_pattern, P};
 normalise_filter({tags, Tags}) -> {by_tags, Tags, any};
-normalise_filter({by_tags, Tags}) -> {by_tags, Tags, any};
-normalise_filter({by_tags, Tags, Match}) -> {by_tags, Tags, Match}.
+normalise_filter({by_tags, Tags}) -> {by_tags, Tags, any}.
 
 %% @private Send a catch-up batch synchronously.
 %%
@@ -713,7 +727,7 @@ deliver_matched(Pid, Matched)  -> Pid ! {events, Matched}, ok.
 %% covered here is a subset of reckon-db's (which adds payload-pattern
 %% and by_event_pattern variants). For mem-evoq we cover the common
 %% test cases and document the rest.
--spec event_matches_filter(event(), filter()) -> boolean().
+-spec event_matches_filter(event(), normalised_filter()) -> boolean().
 event_matches_filter(_Event, all) ->
     true;
 event_matches_filter(#event{stream_id = SID}, {by_stream, SID}) ->
