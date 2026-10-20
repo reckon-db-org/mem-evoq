@@ -5,6 +5,22 @@ All notable changes to mem-evoq will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-10-20
+
+### Changed
+
+- This release goes out through `.github/workflows/publish-hex.yml`: a pushed
+  `v*` tag runs the release guard, this repository's own checks on the tagged
+  commit, and then publishes, and compares what hex serves against the tag file
+  by file.
+
+### Notes
+
+- `v0.1.3` was tagged on 2026-10-20 and never published: the tag was cut before
+  this workflow existed, and a tag runs the workflow from its own tree, so it
+  could not publish. Nothing was sent to hex for it and no version was burned.
+  0.1.4 is the same code with the workflow in the tree.
+
 ## [0.1.3] - 2026-10-20
 
 ### Changed
