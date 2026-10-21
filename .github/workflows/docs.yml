@@ -1,0 +1,26 @@
+# Every Erlang block in the README and the guides compiles against this tree and
+# calls only functions that exist (macula-codebase-checks#8), so a reader who
+# copies an example gets code that works.
+#
+# NO paths-ignore HERE, on purpose: ci.yml ignores doc changes, which is
+# right for the suite and wrong for this check. publish-hex.yml calls this
+# workflow on the tagged commit and publishes only when it is green.
+#
+# `branches: ['**']' keeps a release tag from running it twice.
+name: docs
+
+on:
+  workflow_call:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  erlang-blocks:
+    name: Erlang blocks in the docs
+    permissions:
+      contents: read
+    uses: macula-io/macula-ci-images/.github/workflows/doc-snippets-erlang.yml@2b50b7acbc9889a7e9bb6d7f4b17db2b14fd7f8c

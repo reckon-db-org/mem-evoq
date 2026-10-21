@@ -46,13 +46,14 @@ Read accepts an `Opts` map with a `verify` key:
 A tampered event surfaces as:
 
 ```erlang
-{error, {integrity_violation, #{
-    layer => storage,
-    stream_id => <<"...">>,
-    version => 3,
-    kind => mac_mismatch | chain_mismatch | missing_integrity,
-    context => #{...}
-}}}
+-type integrity_violation() ::
+    {error, {integrity_violation, #{
+        layer := storage,
+        stream_id := binary(),
+        version := non_neg_integer(),
+        kind := mac_mismatch | chain_mismatch | missing_integrity,
+        context := map()
+    }}}.
 ```
 
 Backward reads use the same `verify` semantics. Under the hood the slice is reversed, verified forward, and reversed back — matches reckon-db 2.1.1.
@@ -71,7 +72,9 @@ Load verifies both. The interesting property is the *anchor*: even if an attacke
 When a subscription replays existing events to the subscriber pid before installing the live subscription, each event's MAC is verified first. A violation halts the catch-up — the subscriber receives:
 
 ```erlang
-{subscription_error, {integrity_violation, #{...}}}
+receive
+    {subscription_error, {integrity_violation, #{kind := Kind}}} -> Kind
+end.
 ```
 
 …instead of the remaining batch. No partially-tampered prefix is delivered.
@@ -83,7 +86,7 @@ The shape `mem_evoq` is designed to support:
 ```erlang
 {ok, _} = mem_evoq:start_store(my_store, #{
     integrity => #{enabled => true, key => Key}
-}),
+}).
 %% Drive the application through whatever facade writes events.
 %% Tamper with stored state via sys:replace_state on the store pid
 %% (the store gen_server holds events in plain map entries; see
